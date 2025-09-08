@@ -1,0 +1,25 @@
+{
+  "watch": [
+    "index.js",
+    "routes/",
+    "services/",
+    "utils/",
+    "config/",
+    "middleware/",
+    ".env"
+  ],
+  "ext": "js,json,env",
+  "ignore": [
+    "node_modules/",
+    "logs/",
+    "*.test.js",
+    "*.spec.js",
+    "coverage/"
+  ],
+  "delay": "1000",
+  "env": {
+    "NODE_ENV": "development"
+  },
+  "verbose": true,
+  "colours": true
+}

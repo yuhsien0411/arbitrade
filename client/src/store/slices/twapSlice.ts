@@ -1,0 +1,171 @@
+/**
+ * TWAP策略狀態管理
+ */
+
+import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+
+interface TwapStrategy {
+  id: string;
+  leg1: {
+    exchange: string;
+    symbol: string;
+    type: 'future' | 'spot';
+    side: 'buy' | 'sell';
+  };
+  leg2: {
+    exchange: string;
+    symbol: string;
+    type: 'future' | 'spot';
+    side: 'buy' | 'sell';
+  };
+  totalAmount: number;
+  timeInterval: number;
+  orderCount: number;
+  amountPerOrder: number;
+  priceType: 'market' | 'limit';
+  enabled: boolean;
+  createdAt: number;
+  executedOrders: number;
+  remainingAmount: number;
+  nextExecutionTime: number;
+  status: 'active' | 'paused' | 'completed' | 'cancelled';
+}
+
+interface TwapExecution {
+  strategyId: string;
+  leg1OrderId?: string;
+  leg2OrderId?: string;
+  amount: number;
+  leg1Price?: number;
+  leg2Price?: number;
+  timestamp: number;
+  success: boolean;
+  error?: string;
+}
+
+interface TwapState {
+  strategies: TwapStrategy[];
+  executions: TwapExecution[];
+  isAutoExecuteEnabled: boolean;
+}
+
+const initialState: TwapState = {
+  strategies: [],
+  executions: [],
+  isAutoExecuteEnabled: true,
+};
+
+const twapSlice = createSlice({
+  name: 'twap',
+  initialState,
+  reducers: {
+    addStrategy: (state, action: PayloadAction<TwapStrategy>) => {
+      const existingIndex = state.strategies.findIndex(s => s.id === action.payload.id);
+      if (existingIndex >= 0) {
+        state.strategies[existingIndex] = action.payload;
+      } else {
+        state.strategies.push(action.payload);
+      }
+    },
+    
+    updateStrategy: (state, action: PayloadAction<{ id: string; updates: Partial<TwapStrategy> }>) => {
+      const { id, updates } = action.payload;
+      const index = state.strategies.findIndex(s => s.id === id);
+      if (index >= 0) {
+        state.strategies[index] = { ...state.strategies[index], ...updates };
+      }
+    },
+    
+    removeStrategy: (state, action: PayloadAction<string>) => {
+      state.strategies = state.strategies.filter(s => s.id !== action.payload);
+      // 同時移除相關的執行記錄
+      state.executions = state.executions.filter(e => e.strategyId !== action.payload);
+    },
+    
+    setStrategies: (state, action: PayloadAction<TwapStrategy[]>) => {
+      state.strategies = action.payload;
+    },
+    
+    addExecution: (state, action: PayloadAction<TwapExecution>) => {
+      state.executions.unshift(action.payload);
+      
+      // 限制執行記錄數量
+      if (state.executions.length > 1000) {
+        state.executions = state.executions.slice(0, 1000);
+      }
+      
+      // 更新對應策略的執行狀態
+      const strategyIndex = state.strategies.findIndex(s => s.id === action.payload.strategyId);
+      if (strategyIndex >= 0 && action.payload.success) {
+        const strategy = state.strategies[strategyIndex];
+        strategy.executedOrders += 1;
+        strategy.remainingAmount -= action.payload.amount;
+        strategy.nextExecutionTime = Date.now() + strategy.timeInterval;
+        
+        // 檢查是否完成
+        if (strategy.executedOrders >= strategy.orderCount || strategy.remainingAmount <= 0) {
+          strategy.status = 'completed';
+        }
+      }
+    },
+    
+    pauseStrategy: (state, action: PayloadAction<string>) => {
+      const index = state.strategies.findIndex(s => s.id === action.payload);
+      if (index >= 0) {
+        state.strategies[index].status = 'paused';
+        state.strategies[index].enabled = false;
+      }
+    },
+    
+    resumeStrategy: (state, action: PayloadAction<string>) => {
+      const index = state.strategies.findIndex(s => s.id === action.payload);
+      if (index >= 0 && state.strategies[index].status === 'paused') {
+        state.strategies[index].status = 'active';
+        state.strategies[index].enabled = true;
+        state.strategies[index].nextExecutionTime = Date.now() + state.strategies[index].timeInterval;
+      }
+    },
+    
+    cancelStrategy: (state, action: PayloadAction<string>) => {
+      const index = state.strategies.findIndex(s => s.id === action.payload);
+      if (index >= 0) {
+        state.strategies[index].status = 'cancelled';
+        state.strategies[index].enabled = false;
+      }
+    },
+    
+    setAutoExecute: (state, action: PayloadAction<boolean>) => {
+      state.isAutoExecuteEnabled = action.payload;
+    },
+    
+    clearExecutions: (state) => {
+      state.executions = [];
+    },
+    
+    // 批量更新策略執行時間
+    updateExecutionTimes: (state, action: PayloadAction<Array<{ id: string; nextExecutionTime: number }>>) => {
+      action.payload.forEach(update => {
+        const index = state.strategies.findIndex(s => s.id === update.id);
+        if (index >= 0) {
+          state.strategies[index].nextExecutionTime = update.nextExecutionTime;
+        }
+      });
+    },
+  },
+});
+
+export const {
+  addStrategy,
+  updateStrategy,
+  removeStrategy,
+  setStrategies,
+  addExecution,
+  pauseStrategy,
+  resumeStrategy,
+  cancelStrategy,
+  setAutoExecute,
+  clearExecutions,
+  updateExecutionTimes,
+} = twapSlice.actions;
+
+export default twapSlice.reducer;

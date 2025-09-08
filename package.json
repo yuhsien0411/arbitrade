@@ -1,0 +1,35 @@
+{
+  "name": "crypto-arbitrage-trading-system",
+  "version": "1.0.0",
+  "description": "專業的加密貨幣雙腿套利交易系統",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
+    "server:dev": "cd server && npm run dev",
+    "client:dev": "cd client && npm start",
+    "build": "cd client && npm run build",
+    "start": "cd server && npm start",
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install",
+    "test": "cd server && npm test && cd ../client && npm test"
+  },
+  "keywords": [
+    "cryptocurrency",
+    "arbitrage",
+    "trading",
+    "dual-leg",
+    "twap",
+    "crypto-trading"
+  ],
+  "author": "AI Assistant",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
+  "dependencies": {
+    "bybit-api": "^4.3.0"
+  }
+}
