@@ -49,6 +49,8 @@ let monitoringPairs = [
 // 導入路由和中間件
 const logger = require('./utils/logger');
 const bybitService = require('./services/bybitService');
+const apiRoutes = require('./routes/api');
+const websocketHandler = require('./websocket/handler');
 
 // 更新.env文件的函數
 function updateEnvFile(key, value) {

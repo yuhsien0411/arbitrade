@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # MongoDB 資料庫
+  mongodb:
+    image: mongo:6.0
+    container_name: arbitrage-mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: arbitrage_trading
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - arbitrage-network
+
+  # Redis 快取
+  redis:
+    image: redis:7-alpine
+    container_name: arbitrage-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - arbitrage-network
+
+  # 後端服務
+  backend:
+    build: ./server
+    container_name: arbitrage-backend
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://admin:password123@mongodb:27017/arbitrage_trading?authSource=admin
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./server:/app
+      - /app/node_modules
+    networks:
+      - arbitrage-network
+
+  # 前端服務
+  frontend:
+    build: ./client
+    container_name: arbitrage-frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+    depends_on:
+      - backend
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+    networks:
+      - arbitrage-network
+
+networks:
+  arbitrage-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  redis_data:
