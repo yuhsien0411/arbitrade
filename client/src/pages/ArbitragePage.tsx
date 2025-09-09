@@ -6,7 +6,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Row, Col, Card, Form, Select, InputNumber, Button, Table, Space, 
-  Typography, Tag, Switch, Modal, message, Divider, Alert, Tooltip, Input
+  Typography, Tag, Switch, Modal, message, Divider, Alert, Tooltip, Input,
+  Progress
 } from 'antd';
 import { 
   PlusOutlined, DeleteOutlined, PlayCircleOutlined, PauseCircleOutlined,
@@ -16,6 +17,34 @@ import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
 import { apiService, MonitoringPairConfig } from '../services/api';
 import { addMonitoringPair, removeMonitoringPair, updateMonitoringPair, updateOpportunity } from '../store/slices/arbitrageSlice';
+import { updateExchanges } from '../store/slices/systemSlice';
+
+// 擴展 ArbitragePair 介面以支援新參數
+interface ArbitragePairExtended {
+  id: string;
+  leg1: {
+    exchange: string;
+    symbol: string;
+    type: string;
+    side?: string;
+  };
+  leg2: {
+    exchange: string;
+    symbol: string;
+    type: string;
+    side?: string;
+  };
+  threshold: number;
+  amount: number;
+  enabled: boolean;
+  createdAt: number;
+  lastTriggered: number | null;
+  totalTriggers: number;
+  qty?: number;
+  totalAmount?: number;
+  consumedAmount?: number;
+  [key: string]: any;
+}
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -24,7 +53,9 @@ const { confirm } = Modal;
 const ArbitragePage: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
   const { exchanges, isConnected } = useSelector((state: RootState) => state.system);
-  const { monitoringPairs, currentOpportunities } = useSelector((state: RootState) => state.arbitrage);
+  const { monitoringPairs: rawMonitoringPairs, currentOpportunities } = useSelector((state: RootState) => state.arbitrage);
+  // 將 monitoringPairs 轉換為擴展類型以支援新參數
+  const monitoringPairs = rawMonitoringPairs as ArbitragePairExtended[];
   
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -37,13 +68,19 @@ const ArbitragePage: React.FC = () => {
       key: 'bybit',
       name: 'Bybit',
       supportCustomSymbol: true,
-      description: '支援用戶自行輸入任何可用的交易對'
+      description: '支援用戶自行輸入任何可用的交易對',
+      status: 'active',
+      implemented: true,
+      connected: true
     },
     {
       key: 'binance',
-      name: 'Binance (即將支援)',
+      name: 'Binance',
       supportCustomSymbol: true,
-      description: '支援用戶自行輸入交易對（開發中）'
+      description: '支援用戶自行輸入交易對',
+      status: 'ready',
+      implemented: true,
+      connected: false
     }
   ];
 
@@ -53,15 +90,31 @@ const ArbitragePage: React.FC = () => {
         .map(([key, exchange]) => ({ 
           key, 
           name: exchange.name, 
-          supportCustomSymbol: (exchange as any).supportCustomSymbol || true,
-          description: (exchange as any).description || '支援自定義交易對',
-          connected: exchange.connected
+          supportCustomSymbol: true,
+          description: exchange.message || '支援自定義交易對',
+          connected: exchange.connected,
+          status: exchange.status ?? (key === 'bybit' ? 'active' : 'planned'),
+          implemented: exchange.implemented ?? (key === 'bybit'),
+          features: exchange.features,
+          priority: exchange.priority
         }))
-    : defaultExchanges.map(ex => ({ ...ex, connected: ex.key === 'bybit' }));
+    : defaultExchanges;
 
   // 載入監控交易對和價格數據
   useEffect(() => {
     loadMonitoringPairs();
+
+    // 加載交易所狀態（對齊 pmC.md）
+    (async () => {
+      try {
+        const res = await apiService.getExchangeStatus();
+        if (res?.data) {
+          dispatch(updateExchanges(res.data as any));
+        }
+      } catch (e) {
+        // 忽略錯誤，保留預設 exchanges
+      }
+    })();
     
     // 定期獲取價格數據
     const priceInterval = setInterval(async () => {
@@ -116,10 +169,13 @@ const ArbitragePage: React.FC = () => {
           type: values.leg2_type,
           side: values.leg2_side,
         },
-        threshold: values.threshold,
-        amount: values.amount,
-        enabled: values.enabled ?? true,
-        executionMode: values.executionMode || 'threshold',
+      threshold: values.threshold,
+      amount: values.amount,
+      enabled: values.enabled ?? true,
+      executionMode: values.executionMode || 'threshold',
+      qty: values.qty,
+      totalAmount: values.totalAmount,
+      consumedAmount: 0
       };
 
       let response;
@@ -200,7 +256,12 @@ const ArbitragePage: React.FC = () => {
               <Card size="small" title="Leg 1" style={{ marginBottom: 8 }}>
                 <p><strong>交易所:</strong> {pair.leg1.exchange}</p>
                 <p><strong>交易對:</strong> {pair.leg1.symbol}</p>
-                <p><strong>類型:</strong> {pair.leg1.type === 'spot' ? '現貨' : '合約'}</p>
+                <p><strong>類型:</strong> {
+                  pair.leg1.type === 'spot' ? '現貨' : 
+                  pair.leg1.type === 'linear' ? '線性合約' : 
+                  pair.leg1.type === 'inverse' ? '反向合約' : 
+                  pair.leg1.type === 'future' ? '線性合約' : '合約'
+                }</p>
                 <p><strong>方向:</strong> <Tag color={pair.leg1.side === 'sell' ? 'red' : 'green'}>{pair.leg1.side === 'sell' ? '賣出' : '買入'}</Tag></p>
               </Card>
             </Col>
@@ -209,7 +270,12 @@ const ArbitragePage: React.FC = () => {
               <Card size="small" title="Leg 2" style={{ marginBottom: 8 }}>
                 <p><strong>交易所:</strong> {pair.leg2.exchange}</p>
                 <p><strong>交易對:</strong> {pair.leg2.symbol}</p>
-                <p><strong>類型:</strong> {pair.leg2.type === 'spot' ? '現貨' : '合約'}</p>
+                <p><strong>類型:</strong> {
+                  pair.leg2.type === 'spot' ? '現貨' : 
+                  pair.leg2.type === 'linear' ? '線性合約' : 
+                  pair.leg2.type === 'inverse' ? '反向合約' : 
+                  pair.leg2.type === 'future' ? '線性合約' : '合約'
+                }</p>
                 <p><strong>方向:</strong> <Tag color={pair.leg2.side === 'sell' ? 'red' : 'green'}>{pair.leg2.side === 'sell' ? '賣出' : '買入'}</Tag></p>
               </Card>
             </Col>
@@ -217,6 +283,38 @@ const ArbitragePage: React.FC = () => {
           
           <Card size="small" title="交易參數" style={{ marginTop: 8 }}>
             <Row gutter={16}>
+              <Col span={8}>
+                <p><strong>每筆下單量:</strong> {
+                  Number(pair.qty || 0.01) % 1 === 0 
+                    ? (pair.qty || 0.01).toLocaleString()
+                    : (pair.qty || 0.01).toLocaleString(undefined, { 
+                        minimumFractionDigits: 0, 
+                        maximumFractionDigits: 8 
+                      })
+                }</p>
+              </Col>
+              <Col span={8}>
+                <p><strong>總投入額度:</strong> {
+                  Number(pair.totalAmount || 1000).toLocaleString()
+                }</p>
+              </Col>
+              <Col span={8}>
+                <p><strong>已用額度:</strong> {
+                  Number(pair.consumedAmount || 0).toLocaleString()
+                }</p>
+              </Col>
+            </Row>
+            <Row gutter={16} style={{ marginTop: 8 }}>
+              <Col span={24}>
+                <Progress 
+                  percent={Math.min(100, ((pair.consumedAmount || 0) / (pair.totalAmount || 1000)) * 100)} 
+                  size="small" 
+                  status={(pair.consumedAmount || 0) >= (pair.totalAmount || 1000) ? "success" : "active"}
+                  format={percent => `${percent?.toFixed(1)}% 已用`}
+                />
+              </Col>
+            </Row>
+            <Row gutter={16} style={{ marginTop: 8 }}>
               <Col span={8}>
                 <p><strong>交易數量:</strong> {
                   Number(pair.amount) % 1 === 0 
@@ -357,7 +455,12 @@ const ArbitragePage: React.FC = () => {
         <Space direction="vertical" size="small">
           <Text strong>{record.leg1.symbol}</Text>
           <Text type="secondary" style={{ fontSize: '12px' }}>
-            {exchanges[record.leg1.exchange]?.name} {record.leg1.type} · {record.leg1.side === 'sell' ? '賣出' : '買入'}
+            {exchanges[record.leg1.exchange]?.name} {
+              record.leg1.type === 'spot' ? '現貨' : 
+              record.leg1.type === 'linear' ? '線性合約' : 
+              record.leg1.type === 'inverse' ? '反向合約' : 
+              record.leg1.type === 'future' ? '線性合約' : record.leg1.type
+            } · {record.leg1.side === 'sell' ? '賣出' : '買入'}
           </Text>
         </Space>
       ),
@@ -369,7 +472,12 @@ const ArbitragePage: React.FC = () => {
         <Space direction="vertical" size="small">
           <Text strong>{record.leg2.symbol}</Text>
           <Text type="secondary" style={{ fontSize: '12px' }}>
-            {exchanges[record.leg2.exchange]?.name} {record.leg2.type} · {record.leg2.side === 'sell' ? '賣出' : '買入'}
+            {exchanges[record.leg2.exchange]?.name} {
+              record.leg2.type === 'spot' ? '現貨' : 
+              record.leg2.type === 'linear' ? '線性合約' : 
+              record.leg2.type === 'inverse' ? '反向合約' : 
+              record.leg2.type === 'future' ? '線性合約' : record.leg2.type
+            } · {record.leg2.side === 'sell' ? '賣出' : '買入'}
           </Text>
         </Space>
       ),
@@ -771,6 +879,34 @@ const ArbitragePage: React.FC = () => {
         />
       )}
 
+      {/* 交易所狀態概覽 */}
+      <Card title="📊 交易所狀態" style={{ marginBottom: 24 }} className="card-shadow">
+        <Row gutter={16}>
+          {Object.entries(exchanges).map(([key, exchange]) => (
+            <Col span={6} key={key}>
+              <Card size="small" style={{ textAlign: 'center' }}>
+                <Space direction="vertical" align="center" style={{ width: '100%' }}>
+                  <Text strong style={{ fontSize: '16px' }}>{exchange.name}</Text>
+                  <Tag 
+                    color={
+                      exchange.status === 'active' ? 'green' : 
+                      exchange.status === 'ready' ? 'blue' : 
+                      exchange.status === 'planned' ? 'orange' : 'default'
+                    }
+                  >
+                    {exchange.status === 'active' ? '運行中' : 
+                     exchange.status === 'ready' ? '就緒' : 
+                     exchange.status === 'planned' ? '計劃中' : '未知'}
+                  </Tag>
+                  {!exchange.implemented && <Tag color="red">未實現</Tag>}
+                  {!exchange.connected && exchange.implemented && <Tag color="yellow">未連接</Tag>}
+                </Space>
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      </Card>
+
       {/* 使用說明 */}
       <Card style={{ marginBottom: 24 }} className="card-shadow">
         <Alert
@@ -827,12 +963,14 @@ const ArbitragePage: React.FC = () => {
           form={form}
           layout="vertical"
           onFinish={handleSubmit}
-          initialValues={{
-            enabled: true,
-            threshold: 0.1,
-            amount: 100.0,
-            executionMode: 'market',
-          }}
+        initialValues={{
+          enabled: true,
+          threshold: 0.1,
+          amount: 100.0, // 舊參數保留
+          qty: 0.01,
+          totalAmount: 1000,
+          executionMode: 'market',
+        }}
         >
           {/* 常用交易對快捷選擇 */}
           <Alert
@@ -878,9 +1016,24 @@ const ArbitragePage: React.FC = () => {
                       <Option 
                         key={exchange.key} 
                         value={exchange.key}
-                        disabled={!exchange.connected && exchange.key !== 'bybit'}
+                        disabled={!exchange.connected && !exchange.implemented}
                       >
-                        {exchange.name} {!exchange.connected && exchange.key !== 'bybit' && '(未配置)'}
+                        <Space>
+                          <span>{exchange.name}</span>
+                          <Tag 
+                            color={
+                              exchange.status === 'active' ? 'green' : 
+                              exchange.status === 'ready' ? 'blue' : 
+                              exchange.status === 'planned' ? 'orange' : 'default'
+                            }
+                          >
+                            {exchange.status === 'active' ? '運行中' : 
+                             exchange.status === 'ready' ? '就緒' : 
+                             exchange.status === 'planned' ? '計劃中' : '未知'}
+                          </Tag>
+                          {!exchange.implemented && <Tag color="red">未實現</Tag>}
+                          {!exchange.connected && exchange.implemented && <Tag color="yellow">未連接</Tag>}
+                        </Space>
                       </Option>
                     ))}
                   </Select>
@@ -892,7 +1045,8 @@ const ArbitragePage: React.FC = () => {
                   rules={[{ required: true, message: '請選擇交易類型' }]}
                 >
                   <Select placeholder="選擇類型">
-                    <Option value="future">合約</Option>
+                    <Option value="linear">線性合約</Option>
+                    <Option value="inverse">反向合約</Option>
                     <Option value="spot">現貨</Option>
                   </Select>
                 </Form.Item>
@@ -945,9 +1099,24 @@ const ArbitragePage: React.FC = () => {
                       <Option 
                         key={exchange.key} 
                         value={exchange.key}
-                        disabled={!exchange.connected && exchange.key !== 'bybit'}
+                        disabled={!exchange.connected && !exchange.implemented}
                       >
-                        {exchange.name} {!exchange.connected && exchange.key !== 'bybit' && '(未配置)'}
+                        <Space>
+                          <span>{exchange.name}</span>
+                          <Tag 
+                            color={
+                              exchange.status === 'active' ? 'green' : 
+                              exchange.status === 'ready' ? 'blue' : 
+                              exchange.status === 'planned' ? 'orange' : 'default'
+                            }
+                          >
+                            {exchange.status === 'active' ? '運行中' : 
+                             exchange.status === 'ready' ? '就緒' : 
+                             exchange.status === 'planned' ? '計劃中' : '未知'}
+                          </Tag>
+                          {!exchange.implemented && <Tag color="red">未實現</Tag>}
+                          {!exchange.connected && exchange.implemented && <Tag color="yellow">未連接</Tag>}
+                        </Space>
                       </Option>
                     ))}
                   </Select>
@@ -959,7 +1128,8 @@ const ArbitragePage: React.FC = () => {
                   rules={[{ required: true, message: '請選擇交易類型' }]}
                 >
                   <Select placeholder="選擇類型">
-                    <Option value="future">合約</Option>
+                    <Option value="linear">線性合約</Option>
+                    <Option value="inverse">反向合約</Option>
                     <Option value="spot">現貨</Option>
                   </Select>
                 </Form.Item>
@@ -1028,6 +1198,47 @@ const ArbitragePage: React.FC = () => {
             <Col span={8}>
 
               <Form.Item
+                name="qty"
+                label="每筆下單數量"
+                rules={[
+                  { required: true, message: '請輸入每筆下單數量' },
+                  { type: 'number', min: 0.001, message: '數量必須大於 0.001' }
+                ]}
+                extra="每次觸發時的下單數量"
+              >
+                <InputNumber
+                  min={0.001}
+                  max={1000000}
+                  step={0.001}
+                  precision={8}
+                  style={{ width: '100%' }}
+                  placeholder="0.01"
+                  formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                  parser={value => Number(value!.replace(/\$\s?|(,*)/g, '')) as any}
+                />
+              </Form.Item>
+
+              <Form.Item
+                name="totalAmount"
+                label="總投入額度"
+                rules={[
+                  { required: true, message: '請輸入總投入額度' },
+                  { type: 'number', min: 1, message: '額度必須大於 1' }
+                ]}
+                extra="總計可用於套利的額度（如 USDT）"
+              >
+                <InputNumber
+                  min={1}
+                  max={1000000}
+                  step={1}
+                  style={{ width: '100%' }}
+                  placeholder="1000"
+                  formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                  parser={value => Number(value!.replace(/\$\s?|(,*)/g, '')) as any}
+                />
+              </Form.Item>
+
+              <Form.Item
                 name="threshold"
                 label="觸發閾值 (%)"
                 rules={[{ required: true, message: '請輸入觸發閾值' }]}
@@ -1048,11 +1259,12 @@ const ArbitragePage: React.FC = () => {
               <Form.Item
                 name="amount"
                 label="交易數量"
+                tooltip="已棄用，請使用「每筆下單數量」和「總投入額度」"
                 rules={[
                   { required: true, message: '請輸入交易數量' },
                   { type: 'number', min: 0.001, message: '數量必須大於 0.001' }
                 ]}
-                extra="支援小數點，最小數量：0.001"
+                extra="舊版參數，建議改用上方新參數"
               >
                 <InputNumber
                   min={0.001}

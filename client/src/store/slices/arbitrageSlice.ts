@@ -2,20 +2,21 @@
  * 套利交易狀態管理
  */
 
-import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
+import { apiService } from '../../services/api';
 
 interface ArbitragePair {
   id: string;
   leg1: {
     exchange: string;
     symbol: string;
-    type: 'future' | 'spot';
+    type: 'linear' | 'inverse' | 'spot' | 'future';
     side?: 'buy' | 'sell';
   };
   leg2: {
     exchange: string;
     symbol: string;
-    type: 'future' | 'spot';
+    type: 'linear' | 'inverse' | 'spot' | 'future';
     side?: 'buy' | 'sell';
   };
   threshold: number;
@@ -24,6 +25,10 @@ interface ArbitragePair {
   createdAt: number;
   lastTriggered: number | null;
   totalTriggers: number;
+  // 新增參數
+  qty?: number;
+  totalAmount?: number;
+  consumedAmount?: number;
 }
 
 interface ArbitrageOpportunity {
@@ -72,6 +77,21 @@ const initialState: ArbitrageState = {
   isAutoExecuteEnabled: false,
   executionHistory: [],
 };
+
+export const addWatchPairThunk = createAsyncThunk(
+  'arbitrage/addWatchPair',
+  async (payload: any, { rejectWithValue }) => {
+    try {
+      const res = await apiService.addWatchPair(payload);
+      if ((res as any)?.success === false) {
+        return rejectWithValue((res as any)?.error || '添加失敗');
+      }
+      return (res as any).data || res;
+    } catch (e: any) {
+      return rejectWithValue(e.message || '添加失敗');
+    }
+  }
+);
 
 const arbitrageSlice = createSlice({
   name: 'arbitrage',
@@ -168,6 +188,20 @@ const arbitrageSlice = createSlice({
       });
     },
   },
+  extraReducers: (builder) => {
+    builder
+      .addCase(addWatchPairThunk.fulfilled, (state, action: PayloadAction<any>) => {
+        if (action.payload) {
+          const pair = action.payload;
+          const existingIndex = state.monitoringPairs.findIndex(p => p.id === pair.id);
+          if (existingIndex >= 0) {
+            state.monitoringPairs[existingIndex] = pair;
+          } else {
+            state.monitoringPairs.push(pair);
+          }
+        }
+      });
+  }
 });
 
 export const {

@@ -48,6 +48,55 @@ export const apiService = {
   // 交易所信息
   getExchanges: () => api.get('/api/exchanges'),
   
+  // 新增：交易所狀態（與 /api/exchanges 等價，便於對齊 pmC.md）
+  getExchangeStatus: async (): Promise<ApiResponse<Record<string, ExchangeInfo>>> => {
+    try {
+      const res = await api.get('/api/exchanges');
+      return res as unknown as ApiResponse<Record<string, ExchangeInfo>>;
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  },
+
+  // 新增：獲取指定交易所的 symbols（若後端未返回則使用 mock）
+  getSymbols: async (exchange: string): Promise<ApiResponse<string[]>> => {
+    try {
+      const useMock = (process.env.REACT_APP_USE_MOCK || '').toLowerCase() === 'true';
+      if (useMock) {
+        const mock = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'];
+        return { success: true, data: mock };
+      }
+
+      const res = await api.get('/api/exchanges');
+      const data = (res as unknown as ApiResponse<Record<string, ExchangeInfo>>).data;
+      if (!data || !data[exchange]) {
+        return { success: true, data: [] };
+      }
+      const symbolsInfo = data[exchange].symbols;
+      const symbols: string[] = [];
+      if (symbolsInfo?.spot) symbols.push(...symbolsInfo.spot);
+      if ((symbolsInfo as any)?.future) symbols.push(...(symbolsInfo as any).future);
+      if (symbolsInfo?.linear) symbols.push(...symbolsInfo.linear);
+      if (symbolsInfo?.inverse) symbols.push(...symbolsInfo.inverse);
+      return { success: true, data: Array.from(new Set(symbols)) };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  },
+  
+  // 新增：watch pair（對齊 pmC.md，轉發到現有監控接口）
+  addWatchPair: (payload: any) => api.post('/api/monitoring/pairs', payload),
+
+  // 新增：交易所狀態管理
+  getExchangeStats: () => api.get('/api/exchanges/stats'),
+  getImplementedExchanges: () => api.get('/api/exchanges/implemented'),
+  getPlannedExchanges: () => api.get('/api/exchanges/planned'),
+  getConnectedExchanges: () => api.get('/api/exchanges/connected'),
+  getRecommendedPairs: () => api.get('/api/exchanges/recommended-pairs'),
+  getExchangeFeatures: () => api.get('/api/exchanges/features'),
+  checkFeatureSupport: (exchange: string, feature: string) => 
+    api.get(`/api/exchanges/${exchange}/features/${feature}`),
+  
   // 價格數據
   getPrice: (exchange: string, symbol: string) => 
     api.get(`/api/prices/${exchange}/${symbol}`),
@@ -67,7 +116,7 @@ export const apiService = {
   removeMonitoringPair: (id: string) => 
     api.delete(`/api/monitoring/pairs/${id}`),
 
-  // 獲取監控交易對的實時價格
+  // 獲取監控交易對的實時價格（若後端未提供，請改用 websocket 或 batch）
   getMonitoringPrices: () => api.get('/api/monitoring/prices'),
   
   // 套利執行
@@ -125,9 +174,15 @@ export interface ApiResponse<T = any> {
 export interface ExchangeInfo {
   name: string;
   connected: boolean;
+  status?: 'active' | 'ready' | 'planned' | 'unknown';
+  implemented?: boolean;
+  message?: string;
+  features?: string[];
+  priority?: number;
   symbols?: {
-    future: string[];
     spot: string[];
+    linear: string[];    // 重命名：future -> linear
+    inverse: string[];   // 新增
   };
   comingSoon?: boolean;
 }
@@ -137,19 +192,23 @@ export interface MonitoringPairConfig {
   leg1: {
     exchange: string;
     symbol: string;
-    type: 'future' | 'spot';
+    type: 'future' | 'spot' | 'linear' | 'inverse';
     side?: 'buy' | 'sell';
   };
   leg2: {
     exchange: string;
     symbol: string;
-    type: 'future' | 'spot';
+    type: 'future' | 'spot' | 'linear' | 'inverse';
     side?: 'buy' | 'sell';
   };
   threshold: number;
   amount: number;
   enabled?: boolean;
   executionMode?: 'market' | 'threshold';
+  // 新增參數
+  qty?: number;
+  totalAmount?: number;
+  consumedAmount?: number;
 }
 
 export interface TwapStrategyConfig {

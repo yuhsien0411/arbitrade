@@ -9,7 +9,12 @@
  * - 風險控制
  */
 
-const BybitService = require('./bybitService');
+const ExchangeFactory = require('../exchanges/index');
+const BybitCompatibilityAdapter = require('../exchanges/bybit/BybitCompatibilityAdapter');
+const BinanceExchange = require('../exchanges/binance/BinanceExchange');
+const { getPerformanceMonitor } = require('./PerformanceMonitor');
+const MonitoringDashboard = require('./MonitoringDashboard');
+const ArbitragePerformanceMonitor = require('./ArbitragePerformanceMonitor');
 const logger = require('../utils/logger');
 const EventEmitter = require('events');
 
@@ -17,9 +22,10 @@ class ArbitrageEngine extends EventEmitter {
     constructor() {
         super();
         
-        // 交易所服務實例
+        // 交易所服務實例 - 使用新的架構
         this.exchanges = {
-            bybit: new BybitService()
+            bybit: BybitCompatibilityAdapter, // 使用兼容性適配器實例（已經是單例）
+            binance: null // Binance 交易所實例，將在啟動時初始化
         };
 
         // 監控配置
@@ -30,7 +36,7 @@ class ArbitrageEngine extends EventEmitter {
         // 系統狀態
         this.isRunning = false;
         this.monitoringInterval = null;
-        this.priceUpdateInterval = 1000; // 1秒更新一次價格
+        this.priceUpdateInterval = this.calculateOptimalInterval(); // 動態調整監控頻率
         
         // 風險控制參數
         this.riskLimits = {
@@ -47,6 +53,48 @@ class ArbitrageEngine extends EventEmitter {
             todayProfit: 0,
             lastResetDate: new Date().toDateString()
         };
+
+        // 監控服務 - 雙重監控系統
+        this.performanceMonitor = getPerformanceMonitor(); // 通用性能監控
+        this.monitoringDashboard = new MonitoringDashboard(); // 監控儀表板
+        this.arbitragePerformanceMonitor = new ArbitragePerformanceMonitor(); // 專門的套利性能監控
+        
+        // 市場波動性追蹤
+        this.marketVolatility = 0.03; // 默認波動性
+        this.volatilityHistory = []; // 初始化為空數組
+    }
+
+    /**
+     * 計算最優監控間隔
+     */
+    calculateOptimalInterval() {
+        const volatility = this.calculateMarketVolatility();
+        return volatility > 0.05 ? 500 : 1000; // 高波動時更頻繁監控
+    }
+
+    /**
+     * 計算市場波動性
+     */
+    calculateMarketVolatility() {
+        if (!this.volatilityHistory || this.volatilityHistory.length < 10) {
+            return this.marketVolatility; // 使用默認值
+        }
+        
+        // 計算最近10個價格點的波動性
+        const recentPrices = this.volatilityHistory.slice(-10);
+        let totalVolatility = 0;
+        
+        for (let i = 1; i < recentPrices.length; i++) {
+            const price1 = recentPrices[i - 1];
+            const price2 = recentPrices[i];
+            if (price1 > 0 && price2 > 0) {
+                const volatility = Math.abs(price2 - price1) / price1;
+                totalVolatility += volatility;
+            }
+        }
+        
+        this.marketVolatility = totalVolatility / (recentPrices.length - 1);
+        return this.marketVolatility;
     }
 
     /**
@@ -59,8 +107,31 @@ class ArbitrageEngine extends EventEmitter {
             // 初始化Bybit連接
             await this.exchanges.bybit.initialize();
             
+            // 初始化Binance連接（如果配置了API密鑰）
+            if (process.env.BINANCE_API_KEY && process.env.BINANCE_SECRET_KEY) {
+                try {
+                    this.exchanges.binance = new BinanceExchange({
+                        apiKey: process.env.BINANCE_API_KEY,
+                        secret: process.env.BINANCE_SECRET_KEY,
+                        testnet: process.env.BINANCE_TESTNET === 'true'
+                    });
+                    await this.exchanges.binance.initialize();
+                    logger.info('✅ Binance 交易所初始化成功');
+                } catch (error) {
+                    logger.warn('Binance 交易所初始化失敗，將跳過:', error.message);
+                    this.exchanges.binance = null;
+                }
+            } else {
+                logger.info('未配置 Binance API 密鑰，跳過 Binance 初始化');
+            }
+            
             // 開始價格監控
             this.startPriceMonitoring();
+            
+            // 啟動監控服務 - 雙重監控系統
+            this.performanceMonitor.startMonitoring(); // 通用性能監控
+            this.monitoringDashboard.start(); // 監控儀表板
+            this.arbitragePerformanceMonitor.startMonitoring(); // 專門的套利性能監控
             
             this.isRunning = true;
             logger.info('✅ 套利引擎啟動成功');
@@ -91,6 +162,16 @@ class ArbitrageEngine extends EventEmitter {
 
             // 清理交易所連接
             await this.exchanges.bybit.cleanup();
+            
+            // 清理Binance連接
+            if (this.exchanges.binance) {
+                await this.exchanges.binance.cleanup();
+            }
+
+            // 停止監控服務 - 雙重監控系統
+            this.performanceMonitor.stopMonitoring(); // 通用性能監控
+            this.monitoringDashboard.stop(); // 監控儀表板
+            this.arbitragePerformanceMonitor.stopMonitoring(); // 專門的套利性能監控
 
             logger.info('✅ 套利引擎已停止');
             this.emit('engineStopped');
@@ -104,7 +185,7 @@ class ArbitrageEngine extends EventEmitter {
      * 添加監控交易對
      * 用戶可以選擇要監控的雙腿交易對
      */
-    addMonitoringPair(config) {
+    async addMonitoringPair(config) {
         const {
             id,
             leg1, 
@@ -131,13 +212,24 @@ class ArbitrageEngine extends EventEmitter {
         logger.info('添加監控交易對', pairConfig);
         this.emit('pairAdded', pairConfig);
 
-        // 自動訂閱 Bybit tickers（若為 Bybit 交易對）
+        // 自動訂閱交易所 tickers
         try {
-            const items = [];
-            if (pairConfig.leg1?.exchange === 'bybit') items.push({ symbol: pairConfig.leg1.symbol, category: (pairConfig.leg1.type === 'spot' ? 'spot' : 'linear') });
-            if (pairConfig.leg2?.exchange === 'bybit') items.push({ symbol: pairConfig.leg2.symbol, category: (pairConfig.leg2.type === 'spot' ? 'spot' : 'linear') });
-            if (items.length > 0) {
-                this.exchanges.bybit.subscribeToTickers(items);
+            // 訂閱 Bybit tickers
+            const bybitItems = [];
+            if (pairConfig.leg1?.exchange === 'bybit') bybitItems.push({ symbol: pairConfig.leg1.symbol, category: (pairConfig.leg1.type === 'spot' ? 'spot' : 'linear') });
+            if (pairConfig.leg2?.exchange === 'bybit') bybitItems.push({ symbol: pairConfig.leg2.symbol, category: (pairConfig.leg2.type === 'spot' ? 'spot' : 'linear') });
+            if (bybitItems.length > 0) {
+                this.exchanges.bybit.subscribeToTickers(bybitItems);
+            }
+
+            // 訂閱 Binance tickers
+            if (this.exchanges.binance) {
+                const binanceSymbols = [];
+                if (pairConfig.leg1?.exchange === 'binance') binanceSymbols.push(pairConfig.leg1.symbol);
+                if (pairConfig.leg2?.exchange === 'binance') binanceSymbols.push(pairConfig.leg2.symbol);
+                if (binanceSymbols.length > 0) {
+                    await this.exchanges.binance.subscribeToTickers(binanceSymbols);
+                }
             }
         } catch (e) {
             logger.error('訂閱 tickers 失敗於 addMonitoringPair:', e);
@@ -238,10 +330,10 @@ class ArbitrageEngine extends EventEmitter {
         const { id, leg1, leg2, threshold, amount } = pairConfig;
 
         try {
-            // 目前只支援Bybit，後續可擴展其他交易所
+            // 支持多交易所：Bybit 和 Binance
             let leg1Price, leg2Price;
 
-            // 優先使用 WebSocket tickers 的頂部報價快取；若無，降級至 REST
+            // 獲取 leg1 價格數據
             if (leg1.exchange === 'bybit') {
                 leg1Price = this.exchanges.bybit.getTopOfBook(leg1.symbol) || null;
                 if (!leg1Price) {
@@ -261,8 +353,24 @@ class ArbitrageEngine extends EventEmitter {
                         };
                     }
                 }
+            } else if (leg1.exchange === 'binance' && this.exchanges.binance) {
+                // 獲取 Binance 價格數據
+                try {
+                    const orderBook = await this.exchanges.binance.getOrderBook(leg1.symbol, leg1.type || 'spot');
+                    if (orderBook && orderBook.bids && orderBook.asks) {
+                        leg1Price = {
+                            symbol: leg1.symbol,
+                            exchange: 'binance',
+                            bid1: orderBook.bids[0] ? { price: Number(orderBook.bids[0].price), amount: Number(orderBook.bids[0].amount) } : null,
+                            ask1: orderBook.asks[0] ? { price: Number(orderBook.asks[0].price), amount: Number(orderBook.asks[0].amount) } : null
+                        };
+                    }
+                } catch (error) {
+                    logger.error(`獲取 Binance ${leg1.symbol} 價格失敗:`, error);
+                }
             }
 
+            // 獲取 leg2 價格數據
             if (leg2.exchange === 'bybit') {
                 leg2Price = this.exchanges.bybit.getTopOfBook(leg2.symbol) || null;
                 if (!leg2Price) {
@@ -281,6 +389,21 @@ class ArbitrageEngine extends EventEmitter {
                             ask1: Array.isArray(bestAsk2) && bestAsk2.length >= 2 ? { price: Number(bestAsk2[0]), amount: Number(bestAsk2[1]) } : null
                         };
                     }
+                }
+            } else if (leg2.exchange === 'binance' && this.exchanges.binance) {
+                // 獲取 Binance 價格數據
+                try {
+                    const orderBook = await this.exchanges.binance.getOrderBook(leg2.symbol, leg2.type || 'spot');
+                    if (orderBook && orderBook.bids && orderBook.asks) {
+                        leg2Price = {
+                            symbol: leg2.symbol,
+                            exchange: 'binance',
+                            bid1: orderBook.bids[0] ? { price: Number(orderBook.bids[0].price), amount: Number(orderBook.bids[0].amount) } : null,
+                            ask1: orderBook.asks[0] ? { price: Number(orderBook.asks[0].price), amount: Number(orderBook.asks[0].amount) } : null
+                        };
+                    }
+                } catch (error) {
+                    logger.error(`獲取 Binance ${leg2.symbol} 價格失敗:`, error);
                 }
             }
 
@@ -326,6 +449,7 @@ class ArbitrageEngine extends EventEmitter {
      */
     async executeArbitrage(opportunity) {
         const { id, pairConfig, direction, leg1Price, leg2Price } = opportunity;
+        const startTime = Date.now();
 
         try {
             logger.arbitrage('開始執行套利交易', {
@@ -375,8 +499,21 @@ class ArbitrageEngine extends EventEmitter {
                 };
             }
 
-            // 執行雙腿下單
-            const result = await this.exchanges.bybit.executeDualLegOrder(leg1Order, leg2Order);
+            // 執行雙腿下單 - 支持跨交易所
+            let result;
+            
+            if (leg1.exchange === leg2.exchange) {
+                // 同交易所套利
+                if (leg1.exchange === 'bybit') {
+                    result = await this.exchanges.bybit.executeDualLegOrder(leg1Order, leg2Order);
+                } else if (leg1.exchange === 'binance' && this.exchanges.binance) {
+                    // Binance 同交易所套利（需要實現）
+                    result = await this.executeCrossExchangeArbitrage(leg1Order, leg2Order, 'binance', 'binance');
+                }
+            } else {
+                // 跨交易所套利
+                result = await this.executeCrossExchangeArbitrage(leg1Order, leg2Order, leg1.exchange, leg2.exchange);
+            }
 
             // 更新統計數據
             this.updateStats(result, opportunity);
@@ -388,6 +525,16 @@ class ArbitrageEngine extends EventEmitter {
                 updatedPair.totalTriggers += 1;
                 this.monitoringPairs.set(id, updatedPair);
             }
+
+            // 記錄性能指標 - 雙重監控系統
+            const executionTime = Date.now() - startTime;
+            const profit = opportunity.spread * pairConfig.amount;
+            
+            // 記錄到通用性能監控
+            this.performanceMonitor.recordArbitrageExecution(true, executionTime, profit);
+            
+            // 記錄到專門的套利性能監控
+            this.arbitragePerformanceMonitor.recordArbitrageExecution(true, executionTime, profit);
 
             // 發送執行完成事件
             this.emit('arbitrageExecuted', {
@@ -401,6 +548,17 @@ class ArbitrageEngine extends EventEmitter {
         } catch (error) {
             logger.error(`執行套利交易失敗 ${id}:`, error);
             
+            // 記錄錯誤性能指標 - 雙重監控系統
+            const executionTime = Date.now() - startTime;
+            
+            // 記錄到通用性能監控
+            this.performanceMonitor.recordArbitrageExecution(false, executionTime, 0);
+            this.performanceMonitor.recordError('ARBITRAGE_EXECUTION', error.message);
+            
+            // 記錄到專門的套利性能監控
+            this.arbitragePerformanceMonitor.recordArbitrageExecution(false, executionTime, 0);
+            this.arbitragePerformanceMonitor.recordError('ARBITRAGE_EXECUTION', error.message);
+            
             this.emit('arbitrageExecuted', {
                 opportunity,
                 error: error.message,
@@ -408,6 +566,106 @@ class ArbitrageEngine extends EventEmitter {
             });
 
             return { success: false, error: error.message };
+        }
+    }
+
+    /**
+     * 執行跨交易所套利
+     */
+    async executeCrossExchangeArbitrage(leg1Order, leg2Order, exchange1, exchange2) {
+        const startTime = Date.now();
+        
+        try {
+            logger.arbitrage('開始執行跨交易所套利', {
+                leg1: { exchange: exchange1, symbol: leg1Order.symbol, side: leg1Order.side },
+                leg2: { exchange: exchange2, symbol: leg2Order.symbol, side: leg2Order.side }
+            });
+
+            const results = { leg1: null, leg2: null, success: false };
+
+            // 使用 Promise.allSettled 優化並發處理
+            const promises = [];
+
+            // 執行 leg1 訂單
+            if (exchange1 === 'bybit') {
+                const leg1Promise = this.exchanges.bybit.placeOrder(leg1Order)
+                    .then(result => { results.leg1 = result; })
+                    .catch(error => { results.leg1 = { success: false, error: error.message }; });
+                promises.push(leg1Promise);
+            } else if (exchange1 === 'binance' && this.exchanges.binance) {
+                const leg1Promise = this.exchanges.binance.placeOrder(leg1Order)
+                    .then(result => { results.leg1 = result; })
+                    .catch(error => { results.leg1 = { success: false, error: error.message }; });
+                promises.push(leg1Promise);
+            }
+
+            // 執行 leg2 訂單
+            if (exchange2 === 'bybit') {
+                const leg2Promise = this.exchanges.bybit.placeOrder(leg2Order)
+                    .then(result => { results.leg2 = result; })
+                    .catch(error => { results.leg2 = { success: false, error: error.message }; });
+                promises.push(leg2Promise);
+            } else if (exchange2 === 'binance' && this.exchanges.binance) {
+                const leg2Promise = this.exchanges.binance.placeOrder(leg2Order)
+                    .then(result => { results.leg2 = result; })
+                    .catch(error => { results.leg2 = { success: false, error: error.message }; });
+                promises.push(leg2Promise);
+            }
+
+            // 使用 Promise.allSettled 優化並發處理
+            const settledResults = await Promise.allSettled(promises);
+            
+            // 處理結果
+            settledResults.forEach((result, index) => {
+                if (result.status === 'fulfilled') {
+                    // 成功執行的訂單
+                } else {
+                    // 失敗的訂單，記錄錯誤 - 雙重監控系統
+                    this.performanceMonitor.recordError('ORDER_EXECUTION', result.reason.message);
+                    this.arbitragePerformanceMonitor.recordError('ORDER_EXECUTION', result.reason.message);
+                }
+            });
+
+            // 檢查結果
+            results.success = results.leg1 && results.leg2 && 
+                             results.leg1.success && results.leg2.success;
+
+            // 記錄性能指標 - 雙重監控系統
+            const executionTime = Date.now() - startTime;
+            this.performanceMonitor.recordAPIResponseTime('cross-exchange', 'arbitrage', executionTime);
+            this.arbitragePerformanceMonitor.recordAPIResponseTime('cross-exchange', 'arbitrage', executionTime);
+
+            if (results.success) {
+                logger.arbitrage('跨交易所套利執行成功', results);
+            } else {
+                logger.error('跨交易所套利執行失敗', results);
+                
+                // 如果一個訂單成功，另一個失敗，需要考慮對沖
+                if (results.leg1 && results.leg1.success && results.leg2 && !results.leg2.success) {
+                    logger.warn('Leg1 成功但 Leg2 失敗，需要對沖處理');
+                    // 這裡可以實現對沖邏輯
+                } else if (results.leg2 && results.leg2.success && results.leg1 && !results.leg1.success) {
+                    logger.warn('Leg2 成功但 Leg1 失敗，需要對沖處理');
+                    // 這裡可以實現對沖邏輯
+                }
+            }
+
+            return results;
+
+        } catch (error) {
+            logger.error('跨交易所套利執行異常:', error);
+            
+            // 記錄錯誤性能指標 - 雙重監控系統
+            const executionTime = Date.now() - startTime;
+            this.performanceMonitor.recordError('CROSS_EXCHANGE_ARBITRAGE', error.message);
+            this.arbitragePerformanceMonitor.recordError('CROSS_EXCHANGE_ARBITRAGE', error.message);
+            
+            return {
+                success: false,
+                error: error.message,
+                leg1: null,
+                leg2: null
+            };
         }
     }
 
@@ -576,7 +834,19 @@ class ArbitrageEngine extends EventEmitter {
                 bybit: {
                     connected: this.exchanges.bybit.isExchangeConnected(),
                     availableSymbols: this.exchanges.bybit.getAvailableSymbols().length
+                },
+                binance: this.exchanges.binance ? {
+                    connected: this.exchanges.binance.isConnected,
+                    availableSymbols: this.exchanges.binance.getAvailableSymbols ? this.exchanges.binance.getAvailableSymbols().length : 0
+                } : {
+                    connected: false,
+                    availableSymbols: 0
                 }
+            },
+            monitoring: {
+                performance: this.performanceMonitor.getStatus(),
+                dashboard: this.monitoringDashboard.getStatus(),
+                alerts: this.performanceMonitor.getAlertStats()
             }
         };
     }

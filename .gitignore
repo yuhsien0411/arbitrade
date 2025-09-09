@@ -52,3 +52,4 @@ Thumbs.db
 
 # Cursor rules (workspace-specific)
 *.cursorrules
+.cursor/rules/

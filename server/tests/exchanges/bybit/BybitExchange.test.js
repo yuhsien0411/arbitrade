@@ -33,6 +33,21 @@ describe('BybitExchange', () => {
     };
     
     exchange = new BybitExchange(config);
+    
+    // 正確設置 restClient Mock
+    exchange.restClient = {
+      get: jest.fn(),
+      post: jest.fn(),
+      put: jest.fn(),
+      delete: jest.fn()
+    };
+    
+    // 正確設置 wsClient Mock
+    exchange.wsClient = {
+      subscribe: jest.fn(),
+      isWSConnected: jest.fn().mockReturnValue(true),
+      disconnect: jest.fn()
+    };
   });
 
   afterEach(() => {

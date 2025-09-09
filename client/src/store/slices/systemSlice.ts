@@ -25,9 +25,15 @@ interface SystemState {
     [key: string]: {
       name: string;
       connected: boolean;
+      status?: 'active' | 'ready' | 'planned' | 'unknown';
+      implemented?: boolean;
+      message?: string;
+      features?: string[];
+      priority?: number;
       symbols?: {
-        future: string[];
         spot: string[];
+        linear: string[];
+        inverse: string[];
       };
     };
   };

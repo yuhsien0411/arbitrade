@@ -9,6 +9,9 @@ import { updateOpportunity, addExecution, setMonitoringPairs } from '../store/sl
 import { addExecution as addTwapExecution, setStrategies } from '../store/slices/twapSlice';
 import { updatePrice } from '../store/slices/pricesSlice';
 
+let wsRef: WebSocket | null = null;
+let pollingTimers: Map<string, any> = new Map();
+
 /**
  * 連接WebSocket
  */
@@ -18,6 +21,7 @@ export function connectWebSocket(dispatch: AppDispatch) {
   // 創建WebSocket連接（使用原生WebSocket而不是socket.io）
   const wsUrl = serverUrl.replace('http', 'ws');
   const ws = new WebSocket(wsUrl);
+  wsRef = ws;
 
   dispatch(setConnectionStatus('connecting'));
 
@@ -70,6 +74,10 @@ export function connectWebSocket(dispatch: AppDispatch) {
     if (ws.readyState === WebSocket.OPEN) {
       ws.close();
     }
+    wsRef = null;
+    // 清理所有輪詢
+    pollingTimers.forEach((timer) => clearInterval(timer));
+    pollingTimers.clear();
   };
 }
 
@@ -237,9 +245,11 @@ function handleWebSocketMessage(message: any, dispatch: AppDispatch) {
  * 發送WebSocket消息
  */
 export function sendWebSocketMessage(message: any) {
-  // 這裡需要實現發送消息的邏輯
-  // 由於使用原生WebSocket，需要保存WebSocket實例的引用
-  console.log('發送WebSocket消息:', message);
+  if (wsRef && wsRef.readyState === WebSocket.OPEN) {
+    wsRef.send(JSON.stringify(message));
+  } else {
+    console.log('WebSocket未連接，消息未發送:', message);
+  }
 }
 
 /**
@@ -266,4 +276,59 @@ export function unsubscribePrice(symbol: string) {
       params: { symbol }
     }
   });
+}
+
+// 訂閱ticker（最小資料結構）
+export function subscribeTicker(exchange: string, symbol: string, dispatch: AppDispatch) {
+  // 優先使用WS；若不可用則使用輪詢後備
+  if (wsRef && wsRef.readyState === WebSocket.OPEN) {
+    sendWebSocketMessage({
+      type: 'subscribe',
+      data: { channel: 'ticker', params: { exchange, symbol } }
+    });
+    return;
+  }
+
+  // 後備：2秒輪詢
+  const key = `${exchange}:${symbol}`;
+  if (pollingTimers.has(key)) return;
+  const timer = setInterval(async () => {
+    try {
+      // 這裡簡化為呼叫單價接口；若需更準確可改 batch 或監控接口
+      const res = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:5000'}/api/prices/${exchange}/${symbol}`);
+      const json = await res.json();
+      if (json?.success && json?.data) {
+        const now = Date.now();
+        dispatch(updateOpportunity({
+          id: key,
+          pairConfig: undefined as any,
+          leg1Price: { symbol, exchange, bid1: json.data.bid1 || null, ask1: json.data.ask1 || null },
+          leg2Price: { symbol, exchange, bid1: null, ask1: null },
+          spread: 0,
+          spreadPercent: 0,
+          threshold: 0,
+          shouldTrigger: false,
+          timestamp: now,
+          direction: 'leg1_buy_leg2_sell'
+        }));
+      }
+    } catch (e) {
+      // 忽略輪詢錯誤，避免打擾使用者
+    }
+  }, 2000);
+  pollingTimers.set(key, timer);
+}
+
+export function unsubscribeTicker(exchange: string, symbol: string) {
+  const key = `${exchange}:${symbol}`;
+  if (wsRef && wsRef.readyState === WebSocket.OPEN) {
+    sendWebSocketMessage({
+      type: 'unsubscribe',
+      data: { channel: 'ticker', params: { exchange, symbol } }
+    });
+  }
+  if (pollingTimers.has(key)) {
+    clearInterval(pollingTimers.get(key));
+    pollingTimers.delete(key);
+  }
 }

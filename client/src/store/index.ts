@@ -8,6 +8,7 @@ import systemReducer from './slices/systemSlice';
 import arbitrageReducer from './slices/arbitrageSlice';
 import twapReducer from './slices/twapSlice';
 import pricesReducer from './slices/pricesSlice';
+import exchangesReducer from './slices/exchangesSlice';
 
 export const store = configureStore({
   reducer: {
@@ -15,6 +16,7 @@ export const store = configureStore({
     arbitrage: arbitrageReducer,
     twap: twapReducer,
     prices: pricesReducer,
+    exchanges: exchangesReducer,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
