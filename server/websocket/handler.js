@@ -20,17 +20,24 @@ const connections = new Set();
  */
 function handleConnection(ws, req) {
     const clientIp = req.socket.remoteAddress;
-    logger.info('WebSocket客戶端連接', { clientIp });
+    logger.info('🔌 [WebSocket] 客戶端連接', { 
+      clientIp,
+      userAgent: req.headers['user-agent'],
+      timestamp: new Date().toISOString()
+    });
 
     // 添加到連接集合
     connections.add(ws);
+    logger.info(`📊 [WebSocket] 當前連接數: ${connections.size}`);
 
     // 發送歡迎消息
-    ws.send(JSON.stringify({
+    const welcomeMessage = {
         type: 'welcome',
         message: '歡迎使用雙腿套利交易系統',
         timestamp: Date.now()
-    }));
+    };
+    ws.send(JSON.stringify(welcomeMessage));
+    logger.info('📤 [WebSocket] 發送歡迎消息:', welcomeMessage);
 
     // 獲取套利引擎實例
     const engine = getArbitrageEngine();
@@ -50,26 +57,57 @@ function handleConnection(ws, req) {
     ws.on('message', (data) => {
         try {
             const message = JSON.parse(data);
+            
+            // 處理前端日誌消息
+            if (message.type === 'log') {
+                const logEntry = message.data;
+                logger.info(`📱 [Frontend Log] ${logEntry.level.toUpperCase()}`, {
+                    message: logEntry.message,
+                    data: logEntry.data,
+                    source: logEntry.source,
+                    url: logEntry.url,
+                    timestamp: logEntry.timestamp,
+                    clientIp
+                });
+                return; // 不繼續處理其他邏輯
+            }
+            
+            logger.info('📨 [WebSocket] 收到客戶端消息:', {
+              type: message.type,
+              data: message.data,
+              clientIp,
+              timestamp: new Date().toISOString()
+            });
             handleClientMessage(ws, message);
         } catch (error) {
-            logger.error('解析WebSocket消息失敗:', error);
-            ws.send(JSON.stringify({
+            logger.error('❌ [WebSocket] 解析消息失敗:', error);
+            const errorResponse = {
                 type: 'error',
                 message: '消息格式錯誤',
                 timestamp: Date.now()
-            }));
+            };
+            ws.send(JSON.stringify(errorResponse));
+            logger.info('📤 [WebSocket] 發送錯誤響應:', errorResponse);
         }
     });
 
     // 處理連接關閉
     ws.on('close', () => {
         connections.delete(ws);
-        logger.info('WebSocket客戶端斷開連接', { clientIp });
+        logger.info('🔌 [WebSocket] 客戶端斷開連接', { 
+          clientIp,
+          remainingConnections: connections.size,
+          timestamp: new Date().toISOString()
+        });
     });
 
     // 處理連接錯誤
     ws.on('error', (error) => {
-        logger.error('WebSocket連接錯誤:', error);
+        logger.error('❌ [WebSocket] 連接錯誤:', {
+          error: error.message,
+          clientIp,
+          timestamp: new Date().toISOString()
+        });
         connections.delete(ws);
     });
 

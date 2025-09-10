@@ -3,7 +3,6 @@
  * 針對跨交易所套利進行性能優化
  */
 const ExchangeFactory = require('../exchanges/index');
-const BybitCompatibilityAdapter = require('../exchanges/bybit/BybitCompatibilityAdapter');
 const BinanceExchange = require('../exchanges/binance/BinanceExchange');
 const logger = require('../utils/logger');
 const EventEmitter = require('events');
@@ -14,7 +13,7 @@ class ArbitrageEngineOptimized extends EventEmitter {
         
         // 交易所服務實例
         this.exchanges = {
-            bybit: BybitCompatibilityAdapter,
+            bybit: null, // 將在啟動時初始化
             binance: null
         };
 
@@ -485,3 +484,4 @@ class ArbitrageEngineOptimized extends EventEmitter {
 }
 
 module.exports = ArbitrageEngineOptimized;
+

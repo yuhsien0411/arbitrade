@@ -273,21 +273,29 @@ class BybitExchange extends BaseExchange {
 
   async initialize() {
     try {
-      // 初始化 REST 客戶端
-      this.restClient = new BybitRest(this.config);
-      await this.restClient.initialize();
+      // 創建公共數據客戶端（不需要 API 密鑰）
+      this.publicRestClient = new RestClientV5({
+        testnet: this.config.testnet || false
+      });
 
-      // 初始化 WebSocket 客戶端
-      this.wsClient = new BybitWebSocket(this.config);
-      await this.wsClient.connect();
+      // 如果有 API 密鑰，初始化認證客戶端
+      if (this.config.apiKey && this.config.secret) {
+        this.restClient = new BybitRest(this.config);
+        await this.restClient.initialize();
 
-      // 設置 WebSocket 事件監聽
-      this.setupWebSocketEventHandlers();
+        // 初始化 WebSocket 客戶端
+        this.wsClient = new BybitWebSocket(this.config);
+        await this.wsClient.connect();
+        // 設置 WebSocket 事件監聽
+        this.setupWebSocketEventHandlers();
+        logger.info('[BybitExchange] 完整模式初始化成功（包含 WebSocket）');
+      } else {
+        logger.info('[BybitExchange] 公共數據模式初始化成功（無需 API 密鑰）');
+        this.publicOnly = true;
+      }
 
       this.isConnected = true;
       this.isInitialized = true;
-      
-      logger.info('[BybitExchange] 交易所初始化成功');
       return true;
     } catch (error) {
       logger.error('[BybitExchange] 初始化失敗:', error);
@@ -360,11 +368,25 @@ class BybitExchange extends BaseExchange {
     try {
       const startTime = Date.now();
       
-      const response = await this.restClient.get('market/orderbook', {
-        category: category,
-        symbol: symbol,
-        limit: 25
-      });
+      // 使用公共 API 端點，不需要認證
+      let response;
+      if (this.publicRestClient) {
+        // 使用公共客戶端
+        response = await this.publicRestClient.get('v5/market/orderbook', {
+          category: category,
+          symbol: symbol,
+          limit: 25
+        });
+      } else if (this.restClient) {
+        // 使用認證客戶端
+        response = await this.restClient.get('v5/market/orderbook', {
+          category: category,
+          symbol: symbol,
+          limit: 25
+        });
+      } else {
+        throw new Error('REST 客戶端未初始化');
+      }
 
       const responseTime = Date.now() - startTime;
       this.updateStats(true, responseTime);
@@ -376,9 +398,12 @@ class BybitExchange extends BaseExchange {
     } catch (error) {
       this.updateStats(false);
       logger.error('[BybitExchange] 獲取訂單簿失敗:', error);
+      
+      // 直接返回錯誤，不使用模擬數據
       return {
         success: false,
-        error: error.message
+        error: error.message || '獲取訂單簿失敗',
+        data: null
       };
     }
   }
@@ -460,7 +485,12 @@ class BybitExchange extends BaseExchange {
 
   async subscribeToTickers(symbols) {
     try {
+      // 如果沒有 WebSocket 連接，在公共數據模式下跳過訂閱
       if (!this.wsClient || !this.wsClient.isWSConnected()) {
+        if (!this.config.apiKey && !this.config.secret) {
+          logger.info('[BybitExchange] 公共數據模式：跳過 WebSocket 訂閱');
+          return true;
+        }
         throw new TradingError('WebSocket 未連接', 'CONNECTION_ERROR', 'bybit');
       }
 
@@ -492,16 +522,26 @@ class BybitExchange extends BaseExchange {
     try {
       const startTime = Date.now();
       
-      const response = await this.restClient.get('market/instruments-info', {
-        category: category
-      });
+      // 使用公共 API 端點
+      let response;
+      if (this.publicRestClient) {
+        response = await this.publicRestClient.get('v5/market/instruments-info', {
+          category: category
+        });
+      } else if (this.restClient) {
+        response = await this.restClient.get('v5/market/instruments-info', {
+          category: category
+        });
+      } else {
+        throw new Error('REST 客戶端未初始化');
+      }
 
       const responseTime = Date.now() - startTime;
       this.updateStats(true, responseTime);
 
       return {
         success: true,
-        data: response?.list || []
+        data: response?.result?.list || []
       };
     } catch (error) {
       this.updateStats(false);
@@ -670,6 +710,39 @@ class BybitExchange extends BaseExchange {
     } catch (error) {
       logger.error('[BybitExchange] 清理資源失敗:', error);
     }
+  }
+
+  /**
+   * 獲取可用交易對（兼容現有接口）
+   */
+  getAvailableSymbols(category = 'linear') {
+    // 返回常用交易對列表
+    const commonSymbols = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'SOLUSDT', 'DOGEUSDT', 'XRPUSDT'];
+    return commonSymbols;
+  }
+
+  /**
+   * 檢查是否已連接（兼容現有接口）
+   */
+  isExchangeConnected() {
+    return this.isConnected && this.isInitialized;
+  }
+
+  /**
+   * 獲取頂部報價（兼容現有接口）
+   */
+  getTopOfBook(symbol) {
+    // 從緩存中獲取最新的價格數據
+    const cached = this.tickerCache.get(symbol);
+    if (cached) {
+      return {
+        symbol: symbol,
+        exchange: 'bybit',
+        bid1: cached.bid1,
+        ask1: cached.ask1
+      };
+    }
+    return null;
   }
 }
 

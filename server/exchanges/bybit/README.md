@@ -4,7 +4,6 @@
 - `BybitExchange.js`：交易所高階封裝，整合 REST 與 WebSocket
 - `BybitRest.js`：REST 請求封裝（本地/測試環境為 stub，可替換為實際實作）
 - `BybitWebSocket.js`：WebSocket 封裝（本地/測試環境為 stub，可替換為實際實作）
-- `BybitCompatibilityAdapter.js`：與舊版 `bybitService.js` 介面相容
 - `tests/`：Bybit 模組之單元與整合測試
 - `example.js`：使用範例
 

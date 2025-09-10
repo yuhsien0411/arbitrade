@@ -444,4 +444,120 @@ router.post('/cache/warmup', async (req, res) => {
     }
 });
 
+/**
+ * 獲取監控交易對的實時價格
+ * 注意：前端現在直接調用交易所 API，這個端點主要用於後端 WebSocket 監控
+ */
+router.get('/prices', async (req, res) => {
+    try {
+        // 返回空數組，因為前端現在直接調用交易所 API
+        // 後端專注於 WebSocket 監控 orderbook 數據
+        res.json({
+            success: true,
+            data: [],
+            message: '前端現在直接調用交易所 API 獲取價格數據'
+        });
+    } catch (error) {
+        logger.error('獲取監控價格失敗:', error);
+        res.status(500).json({
+            success: false,
+            error: '獲取監控價格失敗'
+        });
+    }
+});
+
+/**
+ * 獲取監控交易對列表
+ */
+router.get('/pairs', async (req, res) => {
+    try {
+        // 暫時返回空數組，避免前端錯誤
+        res.json({
+            success: true,
+            data: []
+        });
+    } catch (error) {
+        logger.error('獲取監控交易對失敗:', error);
+        res.status(500).json({
+            success: false,
+            error: '獲取監控交易對失敗'
+        });
+    }
+});
+
+/**
+ * 添加監控交易對
+ */
+router.post('/pairs', async (req, res) => {
+    try {
+        const config = req.body;
+        const pairId = config.id || `pair_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
+        // 暫時返回成功響應，實際應該保存到數據庫
+        res.json({
+            success: true,
+            data: {
+                ...config,
+                id: pairId,
+                createdAt: Date.now(),
+                lastTriggered: null,
+                totalTriggers: 0
+            }
+        });
+    } catch (error) {
+        logger.error('添加監控交易對失敗:', error);
+        res.status(500).json({
+            success: false,
+            error: '添加監控交易對失敗'
+        });
+    }
+});
+
+/**
+ * 更新監控交易對
+ */
+router.put('/pairs/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updates = req.body;
+        
+        // 暫時返回成功響應，實際應該更新數據庫
+        res.json({
+            success: true,
+            data: {
+                id,
+                ...updates,
+                updatedAt: Date.now()
+            }
+        });
+    } catch (error) {
+        logger.error('更新監控交易對失敗:', error);
+        res.status(500).json({
+            success: false,
+            error: '更新監控交易對失敗'
+        });
+    }
+});
+
+/**
+ * 刪除監控交易對
+ */
+router.delete('/pairs/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // 暫時返回成功響應，實際應該從數據庫刪除
+        res.json({
+            success: true,
+            message: '監控交易對已刪除'
+        });
+    } catch (error) {
+        logger.error('刪除監控交易對失敗:', error);
+        res.status(500).json({
+            success: false,
+            error: '刪除監控交易對失敗'
+        });
+    }
+});
+
 module.exports = router;

@@ -100,8 +100,8 @@ class BinanceRest extends BaseRest {
         throw new Error('請求頻率過高，請稍後再試');
       }
 
-      // 添加認證簽名（如果需要）
-      if (this.config.apiKey && this.config.secret && endpoint.includes('private')) {
+      // 添加認證簽名（僅對需要認證的私有端點）
+      if (this.config.apiKey && this.config.secret && this.isPrivateEndpoint(endpoint)) {
         const signature = this.createSignature(params);
         params.signature = signature;
         headers['X-MBX-APIKEY'] = this.config.apiKey;
@@ -126,6 +126,22 @@ class BinanceRest extends BaseRest {
       logger.error(`[BinanceRest] 請求失敗 ${method} ${endpoint}:`, error);
       throw error;
     }
+  }
+
+  /**
+   * 判斷是否為私有端點（需要API認證）
+   */
+  isPrivateEndpoint(endpoint) {
+    const privateEndpoints = [
+      '/api/v3/account',
+      '/api/v3/order',
+      '/api/v3/allOrders',
+      '/api/v3/openOrders',
+      '/api/v3/myTrades',
+      '/fapi/v2/positionRisk'
+    ];
+    
+    return privateEndpoints.some(ep => endpoint.includes(ep));
   }
 
   /**
@@ -188,7 +204,7 @@ class BinanceRest extends BaseRest {
   }
 
   /**
-   * 獲取行情數據
+   * 獲取行情數據 (24hr ticker)
    */
   async getTicker(symbol) {
     try {
@@ -209,6 +225,69 @@ class BinanceRest extends BaseRest {
       };
     } catch (error) {
       logger.error(`[BinanceRest] 獲取行情失敗 ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * 獲取當前最優掛單數據 (ticker.book)
+   * 返回最高買單和最低賣單的價格和數量
+   */
+  async getBookTicker(symbol) {
+    try {
+      const response = await this.get('/api/v3/ticker/bookTicker', { symbol });
+      
+      return {
+        lastUpdateId: response.lastUpdateId || 0,
+        symbol: response.symbol,
+        bidPrice: parseFloat(response.bidPrice),
+        bidQty: parseFloat(response.bidQty),
+        askPrice: parseFloat(response.askPrice),
+        askQty: parseFloat(response.askQty),
+        time: response.time || Date.now(),
+        timestamp: Date.now(),
+        exchange: 'Binance'
+      };
+    } catch (error) {
+      logger.error(`[BinanceRest] 獲取最優掛單失敗 ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * 獲取所有交易對的最優掛單數據
+   */
+  async getAllBookTickers() {
+    try {
+      const response = await this.get('/api/v3/ticker/bookTicker');
+      
+      const tickers = Array.isArray(response) 
+        ? response.map(ticker => ({
+            lastUpdateId: ticker.lastUpdateId || 0,
+            symbol: ticker.symbol,
+            bidPrice: parseFloat(ticker.bidPrice),
+            bidQty: parseFloat(ticker.bidQty),
+            askPrice: parseFloat(ticker.askPrice),
+            askQty: parseFloat(ticker.askQty),
+            time: ticker.time || Date.now(),
+            timestamp: Date.now(),
+            exchange: 'Binance'
+          }))
+        : [{
+            lastUpdateId: response.lastUpdateId || 0,
+            symbol: response.symbol,
+            bidPrice: parseFloat(response.bidPrice),
+            bidQty: parseFloat(response.bidQty),
+            askPrice: parseFloat(response.askPrice),
+            askQty: parseFloat(response.askQty),
+            time: response.time || Date.now(),
+            timestamp: Date.now(),
+            exchange: 'Binance'
+          }];
+
+      return tickers;
+    } catch (error) {
+      logger.error(`[BinanceRest] 獲取所有最優掛單失敗:`, error);
       throw error;
     }
   }

@@ -5,7 +5,7 @@
 
 import React, { useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
-import { Layout, message } from 'antd';
+import { Layout, App as AntdApp } from 'antd';
 import { useDispatch } from 'react-redux';
 
 import AppHeader from './components/AppHeader';
@@ -15,6 +15,7 @@ import ArbitragePage from './pages/ArbitragePage';
 import TwapPage from './pages/TwapPage';
 import SettingsPage from './pages/SettingsPage';
 import { connectWebSocket } from './services/websocket';
+import logger from './utils/logger';
 import { apiService } from './services/api';
 import { AppDispatch } from './store';
 import { updateExchanges } from './store/slices/systemSlice';
@@ -23,6 +24,7 @@ const { Content } = Layout;
 
 const App: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
+  const { message } = AntdApp.useApp();
 
   useEffect(() => {
     // 載入交易所信息
@@ -33,7 +35,7 @@ const App: React.FC = () => {
           dispatch(updateExchanges(response.data));
         }
       } catch (error) {
-        console.error('載入交易所信息失敗:', error);
+        logger.error('載入交易所信息失敗', error, 'App');
       }
     };
 
@@ -49,7 +51,7 @@ const App: React.FC = () => {
     return () => {
       cleanup();
     };
-  }, [dispatch]);
+  }, [dispatch, message]);
 
   return (
     <Layout style={{ minHeight: '100vh' }}>

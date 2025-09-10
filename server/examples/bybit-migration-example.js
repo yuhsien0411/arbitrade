@@ -1,36 +1,46 @@
 /*
- * Bybit 遷移示例：展示如何使用兼容性適配器調用新架構
+ * Bybit 遷移示例：展示如何使用新的交易所架構
  */
 require('dotenv').config();
 
-const BybitCompatibilityAdapter = require('../exchanges/bybit/BybitCompatibilityAdapter');
+const ExchangeFactory = require('../exchanges/index');
 
 (async () => {
-  console.log('初始化 Bybit 兼容性適配器...');
-  const ok = await BybitCompatibilityAdapter.initialize();
+  console.log('初始化 Bybit 交易所...');
+  
+  // 創建 Bybit 交易所實例
+  const bybitExchange = ExchangeFactory.createExchange('bybit', {
+    name: 'Bybit',
+    apiKey: process.env.BYBIT_API_KEY,
+    secret: process.env.BYBIT_SECRET,
+    testnet: process.env.BYBIT_TESTNET === 'true'
+  });
+  
+  const ok = await bybitExchange.initialize();
   if (!ok) {
     console.error('初始化失敗，請確認環境變數 BYBIT_API_KEY/BYBIT_SECRET');
     process.exit(1);
   }
 
   console.log('獲取訂單簿...');
-  const ob = await BybitCompatibilityAdapter.getOrderBook('BTCUSDT', 'linear');
+  const ob = await bybitExchange.getOrderBook('BTCUSDT', 'linear');
   console.log('OrderBook:', ob);
 
   console.log('下單示例...');
-  const orderRes = await BybitCompatibilityAdapter.placeOrder({
+  const orderRes = await bybitExchange.placeOrder({
     symbol: 'BTCUSDT',
     side: 'buy',
-    type: 'market',
+    orderType: 'Market',
     qty: '0.001'
   });
   console.log('PlaceOrder:', orderRes);
 
   console.log('訂閱 tickers...');
-  await BybitCompatibilityAdapter.subscribeToTickers([
+  await bybitExchange.subscribeToTickers([
     { symbol: 'BTCUSDT', category: 'linear' },
     { symbol: 'ETHUSDT', category: 'linear' }
   ]);
 
   console.log('完成');
 })();
+

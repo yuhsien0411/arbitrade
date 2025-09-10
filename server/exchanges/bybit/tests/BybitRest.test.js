@@ -24,3 +24,4 @@ describe('BybitRest', () => {
     expect(res.data.orderId).toContain('bybit-');
   });
 });
+

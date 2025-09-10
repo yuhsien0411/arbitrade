@@ -169,8 +169,8 @@ class ExchangeFactory {
       );
     }
 
-    // API 密鑰驗證
-    if (!config.apiKey || !config.secret) {
+    // API 密鑰驗證（支持公共數據模式）
+    if (!config.publicOnly && (!config.apiKey || !config.secret)) {
       throw new TradingError(
         'API 密鑰和密鑰不能為空',
         'INVALID_CONFIG',

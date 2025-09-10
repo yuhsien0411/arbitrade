@@ -28,11 +28,13 @@ binance/
 - ✅ 訂單管理（下單、取消、查詢）
 - ✅ 賬戶信息查詢（餘額、持倉）
 - ✅ 市場數據（行情、訂單簿、K線）
+- ✅ **最優掛單數據 (ticker.book)** - 獲取最高買單和最低賣單
 
 ### WebSocket 訂閱類型
 - 24小時行情統計 (`@ticker`)
 - 訂單簿深度 (`@depth`)
 - 實時交易 (`@trade`)
+- **最優掛單數據 (`@bookTicker`)** - 實時推送最優買單和賣單
 - K線數據 (`@kline`)
 - 用戶數據流（需要認證）
 
@@ -126,7 +128,60 @@ binance.on('trade', (data) => {
 });
 ```
 
-### 6. 用戶數據流（需要認證）
+### 6. 最優掛單數據 (ticker.book)
+
+#### REST API 方式
+
+```javascript
+// 獲取單個交易對的最優掛單
+const bookTicker = await binance.getBookTicker('BTCUSDT');
+console.log('BTCUSDT 最優掛單:', {
+  symbol: bookTicker.symbol,
+  bidPrice: bookTicker.bidPrice,    // 最高買單價格
+  bidQty: bookTicker.bidQty,        // 最高買單數量
+  askPrice: bookTicker.askPrice,    // 最低賣單價格
+  askQty: bookTicker.askQty,        // 最低賣單數量
+  lastUpdateId: bookTicker.lastUpdateId,
+  time: new Date(bookTicker.time)
+});
+
+// 獲取所有交易對的最優掛單
+const allBookTickers = await binance.getAllBookTickers();
+console.log(`總共 ${allBookTickers.length} 個交易對的最優掛單`);
+
+// 使用公開客戶端（無需API KEY）
+const publicClient = new BinancePublicClient();
+const publicTicker = await publicClient.getTicker('BTCUSDT');
+console.log('公開數據模式:', publicTicker.data);
+```
+
+#### WebSocket 實時訂閱
+
+```javascript
+// 訂閱最優掛單數據流
+binance.subscribeBookTicker('BTCUSDT');
+
+// 監聽最優掛單更新
+binance.on('bookTicker', (data) => {
+  console.log(`${data.symbol} 最優掛單更新:`);
+  console.log(`  買單: ${data.bidPrice} (${data.bidQty})`);
+  console.log(`  賣單: ${data.askPrice} (${data.askQty})`);
+  console.log(`  更新ID: ${data.updateId}`);
+  console.log(`  價差: ${(data.askPrice - data.bidPrice).toFixed(4)} USDT`);
+});
+
+// 套利機會監控範例
+binance.on('bookTicker', (data) => {
+  const spread = data.askPrice - data.bidPrice;
+  const spreadPercent = (spread / data.bidPrice) * 100;
+  
+  if (spreadPercent > 0.1) {
+    console.log(`⚠️  ${data.symbol} 價差異常: ${spreadPercent.toFixed(4)}%`);
+  }
+});
+```
+
+### 7. 用戶數據流（需要認證）
 
 ```javascript
 // 訂閱用戶數據流

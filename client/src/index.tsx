@@ -6,7 +6,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { BrowserRouter } from 'react-router-dom';
-import { ConfigProvider } from 'antd';
+import { ConfigProvider, App as AntdApp } from 'antd';
 import zhTW from 'antd/locale/zh_TW';
 import dayjs from 'dayjs';
 import 'dayjs/locale/zh-tw';
@@ -64,7 +64,9 @@ root.render(
           locale={zhTW} 
           theme={theme}
         >
-          <App />
+          <AntdApp>
+            <App />
+          </AntdApp>
         </ConfigProvider>
       </BrowserRouter>
     </Provider>

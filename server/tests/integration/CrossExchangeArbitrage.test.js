@@ -4,12 +4,11 @@
  */
 const { ArbitrageEngine } = require('../../services/arbitrageEngine');
 const ExchangeFactory = require('../../exchanges/index');
-const BybitCompatibilityAdapter = require('../../exchanges/bybit/BybitCompatibilityAdapter');
 const BinanceExchange = require('../../exchanges/binance/BinanceExchange');
 const logger = require('../../utils/logger');
 
 // Mock 外部依賴
-jest.mock('../../exchanges/bybit/BybitCompatibilityAdapter', () => {
+jest.mock('../../exchanges/bybit/BybitExchange', () => {
   return jest.fn();
 });
 jest.mock('../../exchanges/binance/BinanceExchange', () => {
@@ -101,7 +100,8 @@ describe('跨交易所套利集成測試', () => {
     };
 
     // 正確設置 Mock 實現
-    BybitCompatibilityAdapter.mockImplementation(() => mockBybitAdapter);
+    const BybitExchange = require('../../exchanges/bybit/BybitExchange');
+    BybitExchange.mockImplementation(() => mockBybitAdapter);
     BinanceExchange.mockImplementation(() => mockBinanceExchange);
 
     // 創建套利引擎實例

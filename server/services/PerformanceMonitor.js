@@ -251,14 +251,36 @@ class PerformanceMonitor extends EventEmitter {
     /**
      * 記錄套利執行
      */
-    recordArbitrageExecution(data) {
+    recordArbitrageExecution(success, executionTime, profit) {
         this.metrics.arbitrageStats.opportunitiesExecuted++;
         
-        if (data.success && data.profit) {
-            this.metrics.arbitrageStats.totalProfit += data.profit;
+        if (success && profit) {
+            this.metrics.arbitrageStats.totalProfit += profit;
         }
         
-        this.emit('executionRecorded', data);
+        this.emit('executionRecorded', { success, executionTime, profit });
+    }
+
+    /**
+     * 記錄錯誤
+     */
+    recordError(errorType, errorMessage) {
+        if (!this.metrics.errors) {
+            this.metrics.errors = [];
+        }
+        
+        this.metrics.errors.push({
+            type: errorType,
+            message: errorMessage,
+            timestamp: Date.now()
+        });
+        
+        // 保持最近 100 個錯誤記錄
+        if (this.metrics.errors.length > 100) {
+            this.metrics.errors.shift();
+        }
+        
+        this.emit('errorRecorded', { type: errorType, message: errorMessage });
     }
     
     /**
@@ -541,6 +563,19 @@ class PerformanceMonitor extends EventEmitter {
      */
     getCacheStats() {
         return this.cacheManager.getStats();
+    }
+
+    /**
+     * 獲取監控狀態
+     */
+    getStatus() {
+        return {
+            isMonitoring: this.isMonitoring,
+            metrics: this.getMetrics(),
+            config: this.config,
+            uptime: process.uptime(),
+            memoryUsage: process.memoryUsage()
+        };
     }
 
     /**

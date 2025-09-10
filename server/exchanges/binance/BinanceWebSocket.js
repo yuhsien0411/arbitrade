@@ -122,6 +122,9 @@ class BinanceWebSocket extends BaseWebSocket {
       } else if (message.e === 'trade') {
         // 處理交易數據
         this.emit('trade', this.formatTradeData(message));
+      } else if (message.e === 'bookTicker') {
+        // 處理最優掛單數據
+        this.emit('bookTicker', this.formatBookTickerData(message));
       } else if (message.e === 'kline') {
         // 處理K線數據
         this.emit('kline', this.formatKlineData(message));
@@ -183,6 +186,23 @@ class BinanceWebSocket extends BaseWebSocket {
       logger.info(`[BinanceWebSocket] 訂閱交易: ${symbol}`);
     } catch (error) {
       logger.error(`[BinanceWebSocket] 訂閱交易失敗 ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * 訂閱最優掛單數據 (bookTicker)
+   * 實時推送指定交易對最優掛單信息
+   */
+  subscribeBookTicker(symbol) {
+    try {
+      const streamName = `${symbol.toLowerCase()}@bookTicker`;
+      this.subscribe(streamName);
+      this.subscriptions.set(streamName, 'bookTicker');
+      
+      logger.info(`[BinanceWebSocket] 訂閱最優掛單: ${symbol}`);
+    } catch (error) {
+      logger.error(`[BinanceWebSocket] 訂閱最優掛單失敗 ${symbol}:`, error);
       throw error;
     }
   }
@@ -398,6 +418,25 @@ class BinanceWebSocket extends BaseWebSocket {
       high: parseFloat(data.h),
       low: parseFloat(data.l),
       open: parseFloat(data.o),
+      timestamp: data.E,
+      exchange: 'Binance'
+    };
+  }
+
+  /**
+   * 格式化最優掛單數據
+   */
+  formatBookTickerData(data) {
+    return {
+      eventType: data.e,           // 事件類型
+      updateId: data.u,            // 更新ID
+      eventTime: data.E,           // 事件推送時間
+      tradeTime: data.T,           // 撮合時間
+      symbol: data.s,              // 交易對
+      bidPrice: parseFloat(data.b), // 買單最優掛單價格
+      bidQty: parseFloat(data.B),   // 買單最優掛單數量
+      askPrice: parseFloat(data.a), // 賣單最優掛單價格
+      askQty: parseFloat(data.A),   // 賣單最優掛單數量
       timestamp: data.E,
       exchange: 'Binance'
     };

@@ -27,12 +27,21 @@ class BinanceExchange extends BaseExchange {
       this.restClient = new BinanceRest(this.config);
       await this.restClient.initialize();
 
-      // 初始化 WebSocket 客戶端
-      this.wsClient = new BinanceWebSocket(this.config);
-      await this.wsClient.connect();
-
-      // 設置 WebSocket 事件監聽
-      this.setupWebSocketEventHandlers();
+      // 只有在有API KEY時才初始化 WebSocket 客戶端
+      if (this.config.apiKey && this.config.secret) {
+        try {
+          this.wsClient = new BinanceWebSocket(this.config);
+          await this.wsClient.connect();
+          // 設置 WebSocket 事件監聽
+          this.setupWebSocketEventHandlers();
+          logger.info('[BinanceExchange] WebSocket 連接已建立');
+        } catch (wsError) {
+          logger.warn('[BinanceExchange] WebSocket 連接失敗，繼續使用REST模式:', wsError.message);
+          this.wsClient = null;
+        }
+      } else {
+        logger.info('[BinanceExchange] 公開數據模式，跳過 WebSocket 初始化');
+      }
 
       this.isConnected = true;
       this.isInitialized = true;
@@ -65,6 +74,10 @@ class BinanceExchange extends BaseExchange {
       this.emit('trade', data);
     });
 
+    this.wsClient.on('bookTicker', (data) => {
+      this.emit('bookTicker', data);
+    });
+
     this.wsClient.on('error', (error) => {
       logger.error('[BinanceExchange] WebSocket 錯誤:', error);
       this.emit('error', error);
@@ -75,6 +88,10 @@ class BinanceExchange extends BaseExchange {
    * 獲取賬戶信息
    */
   async getAccountInfo() {
+    if (!this.config.apiKey || !this.config.secret) {
+      throw new Error('Binance 公開數據模式：無法獲取賬戶信息，需要API密鑰');
+    }
+    
     try {
       const startTime = Date.now();
       const balance = await this.restClient.getBalance();
@@ -115,9 +132,52 @@ class BinanceExchange extends BaseExchange {
   }
 
   /**
+   * 獲取當前最優掛單數據 (ticker.book)
+   * 返回最高買單和最低賣單的價格和數量
+   */
+  async getBookTicker(symbol) {
+    try {
+      const startTime = Date.now();
+      const bookTicker = await this.restClient.getBookTicker(symbol);
+      const responseTime = Date.now() - startTime;
+      
+      this.updateStats(true, responseTime);
+      
+      return bookTicker;
+    } catch (error) {
+      this.updateStats(false);
+      logger.error(`[BinanceExchange] 獲取最優掛單失敗 ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * 獲取所有交易對的最優掛單數據
+   */
+  async getAllBookTickers() {
+    try {
+      const startTime = Date.now();
+      const bookTickers = await this.restClient.getAllBookTickers();
+      const responseTime = Date.now() - startTime;
+      
+      this.updateStats(true, responseTime);
+      
+      return bookTickers;
+    } catch (error) {
+      this.updateStats(false);
+      logger.error(`[BinanceExchange] 獲取所有最優掛單失敗:`, error);
+      throw error;
+    }
+  }
+
+  /**
    * 下單
    */
   async placeOrder(orderParams) {
+    if (!this.config.apiKey || !this.config.secret) {
+      throw new Error('Binance 公開數據模式：無法下單，需要API密鑰');
+    }
+    
     try {
       const startTime = Date.now();
       
@@ -149,6 +209,10 @@ class BinanceExchange extends BaseExchange {
    * 取消訂單
    */
   async cancelOrder(symbol, orderId, category = 'spot') {
+    if (!this.config.apiKey || !this.config.secret) {
+      throw new Error('Binance 公開數據模式：無法取消訂單，需要API密鑰');
+    }
+    
     try {
       const startTime = Date.now();
       const result = await this.restClient.cancelOrder(orderId, symbol);
@@ -372,6 +436,71 @@ class BinanceExchange extends BaseExchange {
       logger.error(`[BinanceExchange] 獲取訂單歷史失敗 ${symbol}:`, error);
       throw error;
     }
+  }
+
+  /**
+   * WebSocket 訂閱方法
+   */
+
+  /**
+   * 訂閱行情數據
+   */
+  subscribeTicker(symbol) {
+    if (!this.wsClient) {
+      throw new Error('WebSocket 客戶端未初始化');
+    }
+    return this.wsClient.subscribeTicker(symbol);
+  }
+
+  /**
+   * 訂閱訂單簿數據
+   */
+  subscribeOrderBook(symbol, level = 20) {
+    if (!this.wsClient) {
+      throw new Error('WebSocket 客戶端未初始化');
+    }
+    return this.wsClient.subscribeOrderBook(symbol, level);
+  }
+
+  /**
+   * 訂閱交易數據
+   */
+  subscribeTrades(symbol) {
+    if (!this.wsClient) {
+      throw new Error('WebSocket 客戶端未初始化');
+    }
+    return this.wsClient.subscribeTrades(symbol);
+  }
+
+  /**
+   * 訂閱最優掛單數據 (bookTicker)
+   * 實時推送指定交易對最優掛單信息
+   */
+  subscribeBookTicker(symbol) {
+    if (!this.wsClient) {
+      throw new Error('WebSocket 客戶端未初始化');
+    }
+    return this.wsClient.subscribeBookTicker(symbol);
+  }
+
+  /**
+   * 訂閱K線數據
+   */
+  subscribeKline(symbol, interval = '1m') {
+    if (!this.wsClient) {
+      throw new Error('WebSocket 客戶端未初始化');
+    }
+    return this.wsClient.subscribeKline(symbol, interval);
+  }
+
+  /**
+   * 取消訂閱
+   */
+  unsubscribe(streamName) {
+    if (!this.wsClient) {
+      throw new Error('WebSocket 客戶端未初始化');
+    }
+    return this.wsClient.unsubscribe(streamName);
   }
 }
 

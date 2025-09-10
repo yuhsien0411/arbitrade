@@ -1,6 +1,5 @@
 require('dotenv').config();
 const BybitExchange = require('./BybitExchange');
-const BybitCompatibilityAdapter = require('./BybitCompatibilityAdapter');
 
 (async () => {
   console.log('[example] BybitExchange 初始化');
@@ -15,8 +14,10 @@ const BybitCompatibilityAdapter = require('./BybitCompatibilityAdapter');
   const ob = await bybit.getOrderBook('BTCUSDT', 'linear');
   console.log('[example] orderbook', ob);
 
-  console.log('[example] 兼容性適配器初始化');
-  await BybitCompatibilityAdapter.initialize();
-  const ob2 = await BybitCompatibilityAdapter.getOrderBook('BTCUSDT', 'linear');
-  console.log('[example] adapter orderbook', ob2);
+  console.log('[example] 獲取交易對信息');
+  const instruments = await bybit.getInstruments('linear');
+  console.log('[example] instruments', instruments);
+
+  console.log('[example] 完成');
 })();
+

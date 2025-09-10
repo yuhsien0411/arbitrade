@@ -16,6 +16,7 @@ import {
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
 import { apiService } from '../services/api';
+import logger from '../utils/logger';
 
 const { Title, Text } = Typography;
 
@@ -48,7 +49,7 @@ const Dashboard: React.FC = () => {
       setAccountData(accountInfo.data);
       
     } catch (error) {
-      console.error('載入儀表板數據失敗:', error);
+      logger.error('載入儀表板數據失敗', error, 'Dashboard');
     } finally {
       setLoading(false);
     }
@@ -71,26 +72,36 @@ const Dashboard: React.FC = () => {
     {
       title: '交易對',
       key: 'pair',
-      render: (record: any) => (
-        <Space direction="vertical" size="small">
-          <Text strong>{record.pairConfig.leg1.symbol}</Text>
-          <Text type="secondary" style={{ fontSize: '12px' }}>
-            {record.pairConfig.leg1.exchange} {record.pairConfig.leg1.type}
-          </Text>
-        </Space>
-      ),
+      render: (record: any) => {
+        if (!record.pairConfig?.leg1) {
+          return <Text type="secondary">數據載入中...</Text>;
+        }
+        return (
+          <Space direction="vertical" size="small">
+            <Text strong>{record.pairConfig.leg1.symbol || 'N/A'}</Text>
+            <Text type="secondary" style={{ fontSize: '12px' }}>
+              {record.pairConfig.leg1.exchange} {record.pairConfig.leg1.type}
+            </Text>
+          </Space>
+        );
+      },
     },
     {
       title: '對手',
       key: 'counterpart',
-      render: (record: any) => (
-        <Space direction="vertical" size="small">
-          <Text strong>{record.pairConfig.leg2.symbol}</Text>
-          <Text type="secondary" style={{ fontSize: '12px' }}>
-            {record.pairConfig.leg2.exchange} {record.pairConfig.leg2.type}
-          </Text>
-        </Space>
-      ),
+      render: (record: any) => {
+        if (!record.pairConfig?.leg2) {
+          return <Text type="secondary">數據載入中...</Text>;
+        }
+        return (
+          <Space direction="vertical" size="small">
+            <Text strong>{record.pairConfig.leg2.symbol || 'N/A'}</Text>
+            <Text type="secondary" style={{ fontSize: '12px' }}>
+              {record.pairConfig.leg2.exchange} {record.pairConfig.leg2.type}
+            </Text>
+          </Space>
+        );
+      },
     },
     {
       title: '價差',
@@ -98,10 +109,10 @@ const Dashboard: React.FC = () => {
       render: (record: any) => (
         <Space direction="vertical" size="small">
           <Text className={record.spread > 0 ? 'price-positive' : 'price-negative'}>
-            {record.spread.toFixed(6)}
+            {record.spread ? record.spread.toFixed(6) : '-'}
           </Text>
           <Text type="secondary" style={{ fontSize: '12px' }}>
-            {record.spreadPercent.toFixed(3)}%
+            {record.spreadPercent ? record.spreadPercent.toFixed(3) : '-'}%
           </Text>
         </Space>
       ),
@@ -157,7 +168,7 @@ const Dashboard: React.FC = () => {
       key: 'spread',
       render: (record: any) => (
         <Text className={record.opportunity.spread > 0 ? 'price-positive' : 'price-negative'}>
-          {record.opportunity.spreadPercent.toFixed(3)}%
+          {record.opportunity.spreadPercent ? record.opportunity.spreadPercent.toFixed(3) : '-'}%
         </Text>
       ),
     },

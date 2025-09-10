@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Row, Col, Card, Form, InputNumber, Button, Space, Typography, 
-  Divider, Alert, Switch, Input, message, Tabs, Modal, Select, List, Tag, Popconfirm
+  Divider, Alert, Switch, Input, Tabs, Modal, Select, List, Tag, Popconfirm, App as AntdApp
 } from 'antd';
 import { 
   SafetyOutlined, ApiOutlined, SettingOutlined, 
@@ -17,6 +17,7 @@ import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
 import { apiService, RiskSettings, ApiResponse } from '../services/api';
 import { updateRiskLimits } from '../store/slices/systemSlice';
+import logger from '../utils/logger';
 
 const { Title, Text, Paragraph } = Typography;
 const { TabPane } = Tabs;
@@ -24,6 +25,7 @@ const { TabPane } = Tabs;
 
 const SettingsPage: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
+  const { message } = AntdApp.useApp();
   const { engineStatus, exchanges } = useSelector((state: RootState) => state.system);
   
   const [riskForm] = Form.useForm();
@@ -86,12 +88,12 @@ const SettingsPage: React.FC = () => {
       const response = await apiService.getApiSettings();
       if (response.data) {
         apiForm.setFieldsValue({
-          bybitApiKey: response.data.bybitApiKey ? '***已配置***' : '',
-          bybitSecret: response.data.bybitSecret ? '***已配置***' : '',
+          bybitApiKey: (response.data.bybit && response.data.bybit.apiKey) ? '***已配置***' : '',
+          bybitSecret: (response.data.bybit && response.data.bybit.secret) ? '***已配置***' : '',
         });
       }
     } catch (error) {
-      console.error('載入設定失敗:', error);
+      logger.error('載入設定失敗', error, 'SettingsPage');
       // 設置默認值
       apiForm.setFieldsValue({
         bybitApiKey: '',
@@ -135,11 +137,16 @@ const SettingsPage: React.FC = () => {
   const loadApiConfigs = async () => {
     try {
       const response = await apiService.getApiSettings();
+      logger.info('API Settings Response', response, 'SettingsPage');
+      
       if (response.data) {
         const configs = [];
         
+        logger.info('API Settings Data', response.data, 'SettingsPage');
+        
         // 檢查Bybit配置
-        if (response.data.bybitApiKey) {
+        if (response.data.bybit && response.data.bybit.apiKey) {
+          logger.info('Adding Bybit config', null, 'SettingsPage');
           configs.push({
             id: 'bybit',
             exchange: 'bybit',
@@ -150,47 +157,54 @@ const SettingsPage: React.FC = () => {
           });
         }
         
-        // TODO: 未來添加其他交易所的配置檢查
         // 檢查Binance配置
-        if (response.data.binanceApiKey) {
+        if (response.data.binance && response.data.binance.apiKey) {
+          logger.info('Adding Binance config', null, 'SettingsPage');
           configs.push({
             id: 'binance',
             exchange: 'binance',
             name: 'Binance',
             icon: '🟨',
-            status: 'connected',
+            status: 'configured',
             connected: false // 暫時設為false，等待實現
           });
         }
         
         // 檢查OKX配置
-        if (response.data.okxApiKey) {
+        if (response.data.okx && response.data.okx.apiKey) {
+          logger.info('Adding OKX config', null, 'SettingsPage');
           configs.push({
             id: 'okx',
             exchange: 'okx',
             name: 'OKX',
             icon: '⚫',
-            status: 'connected',
+            status: 'configured',
             connected: false // 暫時設為false，等待實現
           });
         }
         
         // 檢查Bitget配置
-        if (response.data.bitgetApiKey) {
+        if (response.data.bitget && response.data.bitget.apiKey) {
+          logger.info('Adding Bitget config', null, 'SettingsPage');
           configs.push({
             id: 'bitget',
             exchange: 'bitget',
             name: 'Bitget',
             icon: '🔵',
-            status: 'connected',
+            status: 'configured',
             connected: false // 暫時設為false，等待實現
           });
         }
         
+        logger.info('Final configs', configs, 'SettingsPage');
         setApiConfigs(configs);
+      } else {
+        logger.info('No API data received, setting empty configs', null, 'SettingsPage');
+        setApiConfigs([]);
       }
     } catch (error) {
-      console.error('載入API配置失敗:', error);
+      logger.error('載入API配置失敗', error, 'SettingsPage');
+      setApiConfigs([]); // 確保在錯誤時也清空配置
     }
   };
 
@@ -212,8 +226,8 @@ const SettingsPage: React.FC = () => {
         if (config.exchange === 'bybit') {
           apiForm.setFieldsValue({
             exchange: 'bybit',
-            apiKey: response.data.bybitApiKey || '',
-            secret: response.data.bybitSecret || '',
+            apiKey: (response.data.bybit && response.data.bybit.apiKey) || '',
+            secret: (response.data.bybit && response.data.bybit.secret) || '',
           });
         }
         
@@ -296,8 +310,12 @@ const SettingsPage: React.FC = () => {
       
       if (config.exchange === 'bybit') {
         const response = await apiService.testApiConnection();
-        if (response.data && response.data.success) {
-          const { accountInfo } = response.data;
+        const responseData = response;
+        logger.info('API Test Response', responseData, 'SettingsPage');
+        
+        // 檢查後端實際返回的成功響應格式
+        if (responseData && responseData.data && responseData.data.connected) {
+          const { accountInfo } = responseData.data;
           
           // 更新本地狀態 - 將連接狀態設為true
           setApiConfigs(prevConfigs => 
@@ -316,7 +334,7 @@ const SettingsPage: React.FC = () => {
               content: (
                 <div>
                   <p><strong>連接狀態：</strong>✅ 連接成功</p>
-                  <p><strong>服務器時間：</strong>{new Date(response.data.serverTime * 1000).toLocaleString()}</p>
+                  <p><strong>服務器時間：</strong>{new Date(responseData.data.serverTime * 1000).toLocaleString()}</p>
                   
                   <Divider />
                   <h4>📊 賬戶配置信息</h4>
@@ -373,7 +391,7 @@ const SettingsPage: React.FC = () => {
               )
             });
           } else {
-            message.success(`${config.name} API連接測試成功`);
+            message.success(`${config.name} API連接測試`);
           }
         } else {
           // 更新本地狀態 - 將連接狀態設為false
@@ -385,15 +403,20 @@ const SettingsPage: React.FC = () => {
             )
           );
           
-          const errorMsg = response.data?.message || 'API連接測試失敗';
+          const errorMsg = responseData.data?.message || 'API連接測試失敗';
 
-          
           Modal.error({
             title: `${config.name} API測試失敗`,
             width: 500,
             content: (
               <div>
                 <p><strong>錯誤信息：</strong>{errorMsg}</p>
+                <p style={{ marginTop: '12px', color: '#666', fontSize: '12px' }}>
+                  請檢查：<br/>
+                  • API 密鑰是否正確配置<br/>
+                  • API 密鑰是否具有必要的權限<br/>
+                  • 網路連接是否正常
+                </p>
               </div>
             )
           });
@@ -516,7 +539,7 @@ const SettingsPage: React.FC = () => {
                       description={
                         <div>
                           <p>今日盈虧: <Text className={engineStatus.stats.todayProfit >= 0 ? 'price-positive' : 'price-negative'}>
-                            ${engineStatus.stats.todayProfit.toFixed(2)}
+                            ${engineStatus.stats.todayProfit ? engineStatus.stats.todayProfit.toFixed(2) : '0.00'}
                           </Text></p>
                           <p>成功交易: {engineStatus.stats.successfulTrades}/{engineStatus.stats.totalTrades}</p>
                         </div>
@@ -827,7 +850,7 @@ const SettingsPage: React.FC = () => {
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <Text>總收益:</Text>
                     <Text className={engineStatus.stats.totalProfit >= 0 ? 'price-positive' : 'price-negative'}>
-                      ${engineStatus.stats.totalProfit.toFixed(2)}
+                      ${engineStatus.stats.totalProfit ? engineStatus.stats.totalProfit.toFixed(2) : '0.00'}
                     </Text>
                   </div>
                 </Space>

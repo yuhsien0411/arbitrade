@@ -60,3 +60,4 @@ class BybitWebSocket extends BaseWebSocket {
 }
 
 module.exports = BybitWebSocket;
+

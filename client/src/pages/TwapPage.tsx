@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Row, Col, Card, Form, Select, InputNumber, Button, Table, Space, 
-  Typography, Tag, Switch, Modal, message, Progress, Alert, Tooltip, Divider
+  Typography, Tag, Switch, Modal, Progress, Alert, Tooltip, Divider, App as AntdApp
 } from 'antd';
 import { 
   PlusOutlined, DeleteOutlined, PlayCircleOutlined, PauseCircleOutlined,
@@ -16,6 +16,8 @@ import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
 import { apiService, TwapStrategyConfig, ApiResponse } from '../services/api';
 import { addStrategy, removeStrategy, pauseStrategy, resumeStrategy, cancelStrategy } from '../store/slices/twapSlice';
+import { formatAmountWithCurrency } from '../utils/formatters';
+import logger from '../utils/logger';
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -23,6 +25,7 @@ const { confirm } = Modal;
 
 const TwapPage: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
+  const { message } = AntdApp.useApp();
   const { exchanges, isConnected } = useSelector((state: RootState) => state.system);
   const { strategies, executions } = useSelector((state: RootState) => state.twap);
   
@@ -45,7 +48,7 @@ const TwapPage: React.FC = () => {
         });
       }
     } catch (error) {
-      console.error('載入TWAP策略失敗:', error);
+      logger.error('載入TWAP策略失敗', error, 'TwapPage');
     }
   }, [dispatch]);
 
@@ -59,8 +62,11 @@ const TwapPage: React.FC = () => {
     try {
       setLoading(true);
       
+      // 生成唯一 ID（如果沒有編輯中的策略）
+      const strategyId = editingStrategy?.id || `twap_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
       const config: TwapStrategyConfig = {
-        id: editingStrategy?.id,
+        id: strategyId,
         leg1: {
           exchange: values.leg1_exchange,
           symbol: values.leg1_symbol,
@@ -82,7 +88,10 @@ const TwapPage: React.FC = () => {
 
       let response: ApiResponse;
       if (editingStrategy) {
-        response = await apiService.updateTwapStrategy(editingStrategy.id, config) as unknown as ApiResponse;
+        // 更新時不傳遞 ID，只傳遞更新數據
+        const updateData = { ...config };
+        delete updateData.id; // 移除 ID，避免傳遞到更新請求中
+        response = await apiService.updateTwapStrategy(editingStrategy.id, updateData) as unknown as ApiResponse;
       } else {
         response = await apiService.addTwapStrategy(config) as unknown as ApiResponse;
       }
@@ -186,38 +195,51 @@ const TwapPage: React.FC = () => {
     {
       title: 'Leg 1',
       key: 'leg1',
-      render: (record: any) => (
-        <Space direction="vertical" size="small">
-          <Text strong>{record.leg1.symbol}</Text>
-          <Text type="secondary" style={{ fontSize: '12px' }}>
-            {exchanges[record.leg1.exchange]?.name} {record.leg1.type}
-          </Text>
-          <Tag color={record.leg1.side === 'buy' ? 'green' : 'red'}>
-            {record.leg1.side === 'buy' ? '買入' : '賣出'}
-          </Tag>
-        </Space>
-      ),
+      render: (record: any) => {
+        if (!record.leg1) {
+          return <Text type="secondary">數據載入中...</Text>;
+        }
+        return (
+          <Space direction="vertical" size="small">
+            <Text strong>{record.leg1.symbol || 'N/A'}</Text>
+            <Text type="secondary" style={{ fontSize: '12px' }}>
+              {exchanges[record.leg1.exchange]?.name} {record.leg1.type}
+            </Text>
+            <Tag color={record.leg1.side === 'buy' ? 'green' : 'red'}>
+              {record.leg1.side === 'buy' ? '買入' : '賣出'}
+            </Tag>
+          </Space>
+        );
+      },
     },
     {
       title: 'Leg 2',
       key: 'leg2',
-      render: (record: any) => (
-        <Space direction="vertical" size="small">
-          <Text strong>{record.leg2.symbol}</Text>
-          <Text type="secondary" style={{ fontSize: '12px' }}>
-            {exchanges[record.leg2.exchange]?.name} {record.leg2.type}
-          </Text>
-          <Tag color={record.leg2.side === 'buy' ? 'green' : 'red'}>
-            {record.leg2.side === 'buy' ? '賣出' : '買入'}
-          </Tag>
-        </Space>
-      ),
+      render: (record: any) => {
+        if (!record.leg2) {
+          return <Text type="secondary">數據載入中...</Text>;
+        }
+        return (
+          <Space direction="vertical" size="small">
+            <Text strong>{record.leg2.symbol || 'N/A'}</Text>
+            <Text type="secondary" style={{ fontSize: '12px' }}>
+              {exchanges[record.leg2.exchange]?.name} {record.leg2.type}
+            </Text>
+            <Tag color={record.leg2.side === 'buy' ? 'green' : 'red'}>
+              {record.leg2.side === 'buy' ? '賣出' : '買入'}
+            </Tag>
+          </Space>
+        );
+      },
     },
     {
       title: '總數量',
-      dataIndex: 'totalAmount',
       key: 'totalAmount',
-      render: (amount: number) => amount.toLocaleString(),
+      render: (record: any) => {
+        // 使用 leg1 的交易對符號來確定幣種
+        const symbol = record.leg1?.symbol || record.leg2?.symbol || 'BTCUSDT';
+        return formatAmountWithCurrency(record.totalAmount, symbol);
+      },
     },
     {
       title: '執行進度',
@@ -245,9 +267,12 @@ const TwapPage: React.FC = () => {
     },
     {
       title: '剩餘數量',
-      dataIndex: 'remainingAmount',
       key: 'remainingAmount',
-      render: (amount: number) => amount.toLocaleString(),
+      render: (record: any) => {
+        // 使用 leg1 的交易對符號來確定幣種
+        const symbol = record.leg1?.symbol || record.leg2?.symbol || 'BTCUSDT';
+        return formatAmountWithCurrency(record.remainingAmount, symbol);
+      },
     },
     {
       title: '狀態',
@@ -356,9 +381,13 @@ const TwapPage: React.FC = () => {
     },
     {
       title: '數量',
-      dataIndex: 'amount',
       key: 'amount',
-      render: (amount: number) => amount.toLocaleString(),
+      render: (record: any) => {
+        // 從策略中獲取交易對符號
+        const strategy = strategies.find(s => s.id === record.strategyId);
+        const symbol = strategy?.leg1?.symbol || 'BTCUSDT';
+        return formatAmountWithCurrency(record.amount, symbol);
+      },
     },
     {
       title: '執行價格',
@@ -652,12 +681,14 @@ const TwapPage: React.FC = () => {
                 name="totalAmount"
                 label="總交易數量"
                 rules={[{ required: true, message: '請輸入總交易數量' }]}
+                extra="每次觸發時的下單數量"
               >
                 <InputNumber
-                  min={1}
-                  step={1}
+                  min={0.01}
+                  step={0.01}
                   style={{ width: '100%' }}
-                  placeholder="1000"
+                  placeholder="1"
+                  addonAfter="幣"
                 />
               </Form.Item>
             </Col>

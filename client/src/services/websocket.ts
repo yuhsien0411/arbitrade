@@ -8,6 +8,7 @@ import { setConnectionStatus, addNotification, updateEngineStatus } from '../sto
 import { updateOpportunity, addExecution, setMonitoringPairs } from '../store/slices/arbitrageSlice';
 import { addExecution as addTwapExecution, setStrategies } from '../store/slices/twapSlice';
 import { updatePrice } from '../store/slices/pricesSlice';
+import logger from '../utils/logger';
 
 let wsRef: WebSocket | null = null;
 let pollingTimers: Map<string, any> = new Map();
@@ -26,7 +27,7 @@ export function connectWebSocket(dispatch: AppDispatch) {
   dispatch(setConnectionStatus('connecting'));
 
   ws.onopen = () => {
-    console.log('WebSocket連接成功');
+    logger.info('WebSocket連接成功', null, 'WebSocket');
     dispatch(setConnectionStatus('connected'));
     dispatch(addNotification({
       type: 'success',
@@ -39,12 +40,12 @@ export function connectWebSocket(dispatch: AppDispatch) {
       const message = JSON.parse(event.data);
       handleWebSocketMessage(message, dispatch);
     } catch (error) {
-      console.error('解析WebSocket消息失敗:', error);
+      logger.error('解析WebSocket消息失敗', error, 'WebSocket');
     }
   };
 
   ws.onclose = () => {
-    console.log('WebSocket連接關閉');
+    logger.info('WebSocket連接關閉', null, 'WebSocket');
     dispatch(setConnectionStatus('disconnected'));
     dispatch(addNotification({
       type: 'warning',
@@ -53,7 +54,7 @@ export function connectWebSocket(dispatch: AppDispatch) {
   };
 
   ws.onerror = (error) => {
-    console.error('WebSocket連接錯誤:', error);
+    logger.error('WebSocket連接錯誤', error, 'WebSocket');
     dispatch(setConnectionStatus('error'));
     dispatch(addNotification({
       type: 'error',
@@ -89,7 +90,7 @@ function handleWebSocketMessage(message: any, dispatch: AppDispatch) {
 
   switch (type) {
     case 'welcome':
-      console.log('收到歡迎消息:', message.message);
+      logger.info('收到歡迎消息', message.message, 'WebSocket');
       break;
 
     case 'ping':
@@ -237,7 +238,7 @@ function handleWebSocketMessage(message: any, dispatch: AppDispatch) {
       break;
 
     default:
-      console.log('未知的WebSocket消息類型:', type, data);
+      logger.info('未知的WebSocket消息類型', { type, data }, 'WebSocket');
   }
 }
 
@@ -248,7 +249,7 @@ export function sendWebSocketMessage(message: any) {
   if (wsRef && wsRef.readyState === WebSocket.OPEN) {
     wsRef.send(JSON.stringify(message));
   } else {
-    console.log('WebSocket未連接，消息未發送:', message);
+    logger.warn('WebSocket未連接，消息未發送', message, 'WebSocket');
   }
 }
 
@@ -299,10 +300,14 @@ export function subscribeTicker(exchange: string, symbol: string, dispatch: AppD
       const json = await res.json();
       if (json?.success && json?.data) {
         const now = Date.now();
+        // 處理訂單簿格式的數據
+        const bid1 = json.data.bids?.[0] ? { price: json.data.bids[0][0], amount: json.data.bids[0][1] } : null;
+        const ask1 = json.data.asks?.[0] ? { price: json.data.asks[0][0], amount: json.data.asks[0][1] } : null;
+        
         dispatch(updateOpportunity({
           id: key,
           pairConfig: undefined as any,
-          leg1Price: { symbol, exchange, bid1: json.data.bid1 || null, ask1: json.data.ask1 || null },
+          leg1Price: { symbol, exchange, bid1, ask1 },
           leg2Price: { symbol, exchange, bid1: null, ask1: null },
           spread: 0,
           spreadPercent: 0,

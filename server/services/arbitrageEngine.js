@@ -10,7 +10,6 @@
  */
 
 const ExchangeFactory = require('../exchanges/index');
-const BybitCompatibilityAdapter = require('../exchanges/bybit/BybitCompatibilityAdapter');
 const BinanceExchange = require('../exchanges/binance/BinanceExchange');
 const { getPerformanceMonitor } = require('./PerformanceMonitor');
 const MonitoringDashboard = require('./MonitoringDashboard');
@@ -24,7 +23,7 @@ class ArbitrageEngine extends EventEmitter {
         
         // 交易所服務實例 - 使用新的架構
         this.exchanges = {
-            bybit: BybitCompatibilityAdapter, // 使用兼容性適配器實例（已經是單例）
+            bybit: null, // Bybit 交易所實例，將在啟動時初始化
             binance: null // Binance 交易所實例，將在啟動時初始化
         };
 
@@ -104,26 +103,52 @@ class ArbitrageEngine extends EventEmitter {
         try {
             logger.info('正在啟動套利引擎...');
 
-            // 初始化Bybit連接
-            await this.exchanges.bybit.initialize();
-            
-            // 初始化Binance連接（如果配置了API密鑰）
-            if (process.env.BINANCE_API_KEY && process.env.BINANCE_SECRET_KEY) {
-                try {
-                    this.exchanges.binance = new BinanceExchange({
-                        apiKey: process.env.BINANCE_API_KEY,
-                        secret: process.env.BINANCE_SECRET_KEY,
-                        testnet: process.env.BINANCE_TESTNET === 'true'
-                    });
-                    await this.exchanges.binance.initialize();
-                    logger.info('✅ Binance 交易所初始化成功');
-                } catch (error) {
-                    logger.warn('Binance 交易所初始化失敗，將跳過:', error.message);
-                    this.exchanges.binance = null;
-                }
-            } else {
-                logger.info('未配置 Binance API 密鑰，跳過 Binance 初始化');
+            // 初始化Bybit連接（支持公共數據模式）
+            try {
+                this.exchanges.bybit = ExchangeFactory.createExchange('bybit', {
+                    name: 'Bybit',
+                    apiKey: process.env.BYBIT_API_KEY || null,
+                    secret: process.env.BYBIT_SECRET || null,
+                    testnet: process.env.BYBIT_TESTNET === 'true',
+                    publicOnly: !process.env.BYBIT_API_KEY // 如果沒有API密鑰，只使用公共數據
+                });
+                await this.exchanges.bybit.initialize();
+                logger.info('✅ Bybit 交易所初始化成功');
+            } catch (error) {
+                logger.warn('⚠️ Bybit 交易所初始化失敗，將使用公共數據模式:', error.message);
+                // 創建一個只支援公共數據的 Bybit 實例
+                this.exchanges.bybit = ExchangeFactory.createExchange('bybit', {
+                    name: 'Bybit',
+                    apiKey: null,
+                    secret: null,
+                    testnet: false,
+                    publicOnly: true
+                });
+                await this.exchanges.bybit.initialize();
             }
+            
+            // 更新連接狀態
+            this.performanceMonitor.updateConnectionStatus('bybit', true);
+            
+            // 初始化Binance連接（支持公開數據模式，無需API密鑰）
+            try {
+                this.exchanges.binance = new BinanceExchange({
+                    apiKey: process.env.BINANCE_API_KEY || null,
+                    secret: process.env.BINANCE_SECRET_KEY || null,
+                    testnet: process.env.BINANCE_TESTNET === 'true'
+                });
+                await this.exchanges.binance.initialize();
+                logger.info('✅ Binance 交易所初始化成功（公開數據模式）');
+                
+                // 更新連接狀態
+                this.performanceMonitor.updateConnectionStatus('binance', true);
+            } catch (error) {
+                logger.warn('Binance 交易所初始化失敗，將跳過:', error.message);
+                this.exchanges.binance = null;
+                // 設置Binance為未連接狀態
+                this.performanceMonitor.updateConnectionStatus('binance', false);
+            }
+            
             
             // 開始價格監控
             this.startPriceMonitoring();
@@ -180,6 +205,7 @@ class ArbitrageEngine extends EventEmitter {
             logger.error('套利引擎停止失敗:', error);
         }
     }
+
 
     /**
      * 添加監控交易對
@@ -411,12 +437,29 @@ class ArbitrageEngine extends EventEmitter {
                 return null;
             }
 
-            // 計算價差 (leg1 bid1 - leg2 ask1)
-            const spread = leg1Price.bid1.price - leg2Price.ask1.price;
-            const spreadPercent = (spread / leg2Price.ask1.price) * 100;
+            // 計算價差 - 根據交易方向計算正確的價差
+            let spread, spreadPercent;
+            
+            if (leg1.side === 'buy' && leg2.side === 'sell') {
+                // leg1 買入，leg2 賣出：leg1 的 ask 價格 vs leg2 的 bid 價格
+                const leg1AskPrice = leg1Price.ask1 ? leg1Price.ask1.price : leg1Price.bid1.price;
+                const leg2BidPrice = leg2Price.bid1 ? leg2Price.bid1.price : leg2Price.ask1.price;
+                spread = leg2BidPrice - leg1AskPrice; // 賣出價格 - 買入價格
+                spreadPercent = leg1AskPrice > 0 ? (spread / leg1AskPrice) * 100 : 0;
+            } else if (leg1.side === 'sell' && leg2.side === 'buy') {
+                // leg1 賣出，leg2 買入：leg1 的 bid 價格 vs leg2 的 ask 價格
+                const leg1BidPrice = leg1Price.bid1 ? leg1Price.bid1.price : leg1Price.ask1.price;
+                const leg2AskPrice = leg2Price.ask1 ? leg2Price.ask1.price : leg2Price.bid1.price;
+                spread = leg1BidPrice - leg2AskPrice; // 賣出價格 - 買入價格
+                spreadPercent = leg2AskPrice > 0 ? (spread / leg2AskPrice) * 100 : 0;
+            } else {
+                // 預設情況：使用原來的邏輯但修正計算
+                spread = leg1Price.bid1.price - leg2Price.ask1.price;
+                spreadPercent = leg2Price.ask1.price > 0 ? (spread / leg2Price.ask1.price) * 100 : 0;
+            }
 
-            // 檢查是否達到觸發閾值
-            const shouldTrigger = Math.abs(spreadPercent) >= threshold;
+            // 檢查是否達到觸發閾值（只考慮正價差）
+            const shouldTrigger = spreadPercent >= threshold;
 
             const opportunity = {
                 id,
@@ -502,17 +545,20 @@ class ArbitrageEngine extends EventEmitter {
             // 執行雙腿下單 - 支持跨交易所
             let result;
             
-            if (leg1.exchange === leg2.exchange) {
-                // 同交易所套利
-                if (leg1.exchange === 'bybit') {
-                    result = await this.exchanges.bybit.executeDualLegOrder(leg1Order, leg2Order);
-                } else if (leg1.exchange === 'binance' && this.exchanges.binance) {
-                    // Binance 同交易所套利（需要實現）
-                    result = await this.executeCrossExchangeArbitrage(leg1Order, leg2Order, 'binance', 'binance');
-                }
+            if (pairConfig.leg1.exchange === pairConfig.leg2.exchange) {
+                // 同交易所套利 - 分別執行兩個訂單
+                const leg1Result = await this.executeSingleOrder(leg1Order, pairConfig.leg1.exchange);
+                const leg2Result = await this.executeSingleOrder(leg2Order, pairConfig.leg2.exchange);
+                
+                result = {
+                    success: leg1Result.success && leg2Result.success,
+                    leg1: leg1Result,
+                    leg2: leg2Result,
+                    message: leg1Result.success && leg2Result.success ? '同交易所套利執行成功' : '同交易所套利執行失敗'
+                };
             } else {
                 // 跨交易所套利
-                result = await this.executeCrossExchangeArbitrage(leg1Order, leg2Order, leg1.exchange, leg2.exchange);
+                result = await this.executeCrossExchangeArbitrage(leg1Order, leg2Order, pairConfig.leg1.exchange, pairConfig.leg2.exchange);
             }
 
             // 更新統計數據
@@ -566,6 +612,30 @@ class ArbitrageEngine extends EventEmitter {
             });
 
             return { success: false, error: error.message };
+        }
+    }
+
+    /**
+     * 執行單個訂單
+     */
+    async executeSingleOrder(order, exchange) {
+        try {
+            if (exchange === 'bybit') {
+                return await this.exchanges.bybit.placeOrder(order);
+            } else if (exchange === 'binance' && this.exchanges.binance) {
+                return await this.exchanges.binance.placeOrder(order);
+            } else {
+                return {
+                    success: false,
+                    error: `不支援的交易所: ${exchange}`
+                };
+            }
+        } catch (error) {
+            logger.error(`執行單個訂單失敗 (${exchange}):`, error);
+            return {
+                success: false,
+                error: error.message
+            };
         }
     }
 
@@ -831,9 +901,12 @@ class ArbitrageEngine extends EventEmitter {
             stats: this.stats,
             riskLimits: this.riskLimits,
             exchanges: {
-                bybit: {
+                bybit: this.exchanges.bybit ? {
                     connected: this.exchanges.bybit.isExchangeConnected(),
                     availableSymbols: this.exchanges.bybit.getAvailableSymbols().length
+                } : {
+                    connected: false,
+                    availableSymbols: 0
                 },
                 binance: this.exchanges.binance ? {
                     connected: this.exchanges.binance.isConnected,

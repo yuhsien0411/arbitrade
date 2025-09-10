@@ -63,3 +63,4 @@ class BybitRest extends BaseRest {
 }
 
 module.exports = BybitRest;
+

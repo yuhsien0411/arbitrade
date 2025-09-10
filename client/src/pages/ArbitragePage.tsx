@@ -3,21 +3,23 @@
  * 參考Taoli Tools設計，實現專業的雙腿下單功能
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Row, Col, Card, Form, Select, InputNumber, Button, Table, Space, 
-  Typography, Tag, Switch, Modal, message, Divider, Alert, Tooltip, Input,
-  Progress
+  Typography, Tag, Switch, Modal, Divider, Alert, Tooltip, Input, App as AntdApp
 } from 'antd';
 import { 
   PlusOutlined, DeleteOutlined, PlayCircleOutlined, PauseCircleOutlined,
-  SwapOutlined, SettingOutlined, ReloadOutlined, ExclamationCircleOutlined
+  SettingOutlined, ReloadOutlined, ExclamationCircleOutlined
 } from '@ant-design/icons';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
 import { apiService, MonitoringPairConfig } from '../services/api';
 import { addMonitoringPair, removeMonitoringPair, updateMonitoringPair, updateOpportunity } from '../store/slices/arbitrageSlice';
 import { updateExchanges } from '../store/slices/systemSlice';
+import { formatAmountWithCurrency } from '../utils/formatters';
+import exchangeApi from '../services/exchangeApi';
+import logger from '../utils/logger';
 
 // 擴展 ArbitragePair 介面以支援新參數
 interface ArbitragePairExtended {
@@ -52,6 +54,7 @@ const { confirm } = Modal;
 
 const ArbitragePage: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
+  const { message } = AntdApp.useApp();
   const { exchanges, isConnected } = useSelector((state: RootState) => state.system);
   const { monitoringPairs: rawMonitoringPairs, currentOpportunities } = useSelector((state: RootState) => state.arbitrage);
   // 將 monitoringPairs 轉換為擴展類型以支援新參數
@@ -100,6 +103,19 @@ const ArbitragePage: React.FC = () => {
         }))
     : defaultExchanges;
 
+  const loadMonitoringPairs = useCallback(async () => {
+    try {
+      const response = await apiService.getMonitoringPairs();
+      if (response.data && Array.isArray(response.data)) {
+        response.data.forEach((pair: any) => {
+          dispatch(addMonitoringPair(pair));
+        });
+      }
+    } catch (error) {
+      logger.error('載入監控交易對失敗', error, 'ArbitragePage');
+    }
+  }, [dispatch]);
+
   // 載入監控交易對和價格數據
   useEffect(() => {
     loadMonitoringPairs();
@@ -116,76 +132,188 @@ const ArbitragePage: React.FC = () => {
       }
     })();
     
-    // 定期獲取價格數據
-    const priceInterval = setInterval(async () => {
+    // 直接從交易所獲取 ticker 數據，而不是通過後端
+    const fetchTickerData = async () => {
       try {
-        const response = await apiService.getMonitoringPrices();
-        if (response.data && Array.isArray(response.data)) {
-          // 更新 Redux store 中的套利機會數據
-          response.data.forEach((opportunity: any) => {
+        logger.info('開始獲取 ticker 數據', { monitoringPairsCount: monitoringPairs.length }, 'ArbitragePage');
+        // 如果有監控交易對，直接從交易所獲取數據
+        if (monitoringPairs.length > 0) {
+          for (const pair of monitoringPairs) {
+            try {
+              logger.info(`獲取交易對 ${pair.id} 的價格數據`, {
+                leg1: `${pair.leg1.exchange}:${pair.leg1.symbol}`,
+                leg2: `${pair.leg2.exchange}:${pair.leg2.symbol}`
+              }, 'ArbitragePage');
+              
+              // 並行獲取兩個交易所的 ticker 數據
+              const [leg1Ticker, leg2Ticker] = await Promise.allSettled([
+                exchangeApi.bybit.getTicker(pair.leg1.symbol),
+                // 使用後端API獲取Binance數據，避免CORS問題
+                fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:5000'}/api/prices/binance/${pair.leg2.symbol}`)
+                  .then(res => res.json())
+                  .then(data => {
+                    if (data.success && data.data) {
+                      return {
+                        symbol: data.data.symbol,
+                        bidPrice: data.data.bids?.[0]?.[0] || 0,
+                        askPrice: data.data.asks?.[0]?.[0] || 0,
+                        lastPrice: 0,
+                        volume: 0,
+                        timestamp: data.data.timestamp
+                      };
+                    }
+                    throw new Error('Binance API 返回數據格式錯誤');
+                  })
+              ]);
+
+              if (leg1Ticker.status === 'fulfilled' && leg2Ticker.status === 'fulfilled') {
+                logger.info(`成功獲取交易對 ${pair.id} 的價格數據`, {
+                  leg1: leg1Ticker.value,
+                  leg2: leg2Ticker.value
+                }, 'ArbitragePage');
+                
+                // 計算套利機會
+                const opportunity = exchangeApi.calculateArbitrageOpportunity(
+                  leg1Ticker.value,
+                  leg2Ticker.value,
+                  (pair.leg1.side as 'buy' | 'sell') || 'buy',
+                  (pair.leg2.side as 'buy' | 'sell') || 'sell'
+                );
+                
+                logger.info(`交易對 ${pair.id} 套利機會計算結果`, opportunity, 'ArbitragePage');
+
+                // 更新 Redux store
+                dispatch(updateOpportunity({
+                  id: pair.id,
+                  pairConfig: {
+                    ...pair,
+                    leg1: {
+                      ...pair.leg1,
+                      type: pair.leg1.type as 'linear' | 'inverse' | 'spot' | 'future',
+                      side: (pair.leg1.side as 'buy' | 'sell') || 'buy'
+                    },
+                    leg2: {
+                      ...pair.leg2,
+                      type: pair.leg2.type as 'linear' | 'inverse' | 'spot' | 'future',
+                      side: (pair.leg2.side as 'buy' | 'sell') || 'sell'
+                    }
+                  },
+                  leg1Price: {
+                    ...opportunity.leg1Price,
+                    bid1: { price: opportunity.leg1Price.bid1.price, amount: 0 },
+                    ask1: { price: opportunity.leg1Price.ask1.price, amount: 0 }
+                  },
+                  leg2Price: {
+                    ...opportunity.leg2Price,
+                    bid1: { price: opportunity.leg2Price.bid1.price, amount: 0 },
+                    ask1: { price: opportunity.leg2Price.ask1.price, amount: 0 }
+                  },
+                  spread: opportunity.spread,
+                  spreadPercent: opportunity.spreadPercent,
+                  threshold: pair.threshold || 0.1,
+                  shouldTrigger: opportunity.shouldTrigger,
+                  timestamp: opportunity.timestamp,
+                  direction: (pair.leg1.side === 'sell' && pair.leg2.side === 'buy') 
+                    ? 'leg1_sell_leg2_buy' 
+                    : 'leg1_buy_leg2_sell'
+                }));
+              }
+            } catch (error) {
+              logger.error(`獲取交易對 ${pair.id} 價格失敗`, error, 'ArbitragePage');
+            }
+          }
+        } else {
+          // 沒有監控交易對時，使用模擬數據
+          const mockOpportunities = [
+            {
+              id: 'mock_pair_1',
+              leg1Price: {
+                symbol: 'BTCUSDT',
+                exchange: 'bybit',
+                bid1: { price: 50000 + Math.random() * 1000 },
+                ask1: { price: 50000 + Math.random() * 1000 + 10 }
+              },
+              leg2Price: {
+                symbol: 'BTCUSDT',
+                exchange: 'binance',
+                bid1: { price: 50000 + Math.random() * 1000 },
+                ask1: { price: 50000 + Math.random() * 1000 + 10 }
+              },
+              spread: Math.random() * 0.1,
+              spreadPercent: Math.random() * 0.1,
+              shouldTrigger: Math.random() > 0.7,
+              timestamp: Date.now()
+            }
+          ];
+          
+          mockOpportunities.forEach((opportunity: any) => {
             dispatch(updateOpportunity(opportunity));
           });
         }
       } catch (error) {
-        console.error('獲取實時價格失敗:', error);
+        logger.error('獲取實時價格失敗', error, 'ArbitragePage');
       }
-    }, 1000); // 每1秒更新一次
+    };
+
+    // 定期獲取價格數據（降低頻率到 10 秒）
+    const priceInterval = setInterval(fetchTickerData, 10000);
 
     // 清理定時器
     return () => {
       clearInterval(priceInterval);
     };
-  }, [dispatch]);
-
-  const loadMonitoringPairs = async () => {
-    try {
-      const response = await apiService.getMonitoringPairs();
-      if (response.data && Array.isArray(response.data)) {
-        response.data.forEach((pair: any) => {
-          dispatch(addMonitoringPair(pair));
-        });
-      }
-    } catch (error) {
-      console.error('載入監控交易對失敗:', error);
-    }
-  };
+  }, [dispatch, loadMonitoringPairs, monitoringPairs]);
 
   // 添加/更新監控交易對
   const handleSubmit = async (values: any) => {
     try {
+      logger.info('開始提交監控交易對表單', values, 'ArbitragePage');
       setLoading(true);
       
+      // 生成唯一 ID（如果沒有編輯中的交易對）
+      const pairId = editingPair?.id || `pair_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
       const config: MonitoringPairConfig = {
-        id: editingPair?.id,
+        id: pairId,
         leg1: {
-          exchange: values.leg1_exchange,
-          symbol: values.leg1_symbol,
-          type: values.leg1_type,
-          side: values.leg1_side,
+          exchange: values.leg1_exchange || 'bybit',
+          symbol: values.leg1_symbol || 'BTCUSDT',
+          type: values.leg1_type || 'spot',
+          side: values.leg1_side || 'buy',
         },
         leg2: {
-          exchange: values.leg2_exchange,
-          symbol: values.leg2_symbol,
-          type: values.leg2_type,
-          side: values.leg2_side,
+          exchange: values.leg2_exchange || 'binance',
+          symbol: values.leg2_symbol || 'BTCUSDT',
+          type: values.leg2_type || 'spot',
+          side: values.leg2_side || 'sell',
         },
-      threshold: values.threshold,
-      amount: values.amount,
-      enabled: values.enabled ?? true,
-      executionMode: values.executionMode || 'threshold',
-      qty: values.qty,
-      totalAmount: values.totalAmount,
-      consumedAmount: 0
+        threshold: values.threshold || 0.1,
+        amount: values.amount || 100,
+        enabled: values.enabled ?? true,
+        executionMode: values.executionMode || 'threshold',
+        qty: values.qty || 0.01,
+        totalAmount: values.totalAmount || 1000,
+        consumedAmount: 0
       };
 
+      logger.info('構建的監控配置', config, 'ArbitragePage');
+      
       let response;
       if (editingPair) {
-        response = await apiService.updateMonitoringPair(editingPair.id, config);
+        logger.info('更新現有監控交易對', editingPair.id, 'ArbitragePage');
+        // 更新時不傳遞 ID，只傳遞更新數據
+        const updateData = { ...config };
+        delete updateData.id; // 移除 ID，避免傳遞到更新請求中
+        response = await apiService.updateMonitoringPair(editingPair.id, updateData);
+        logger.info('更新響應', response, 'ArbitragePage');
       } else {
+        logger.info('添加新監控交易對', null, 'ArbitragePage');
         response = await apiService.addMonitoringPair(config);
+        logger.info('添加響應', response, 'ArbitragePage');
       }
 
       if (response.data) {
+        logger.info('操作成功，更新 Redux 狀態', response.data, 'ArbitragePage');
         dispatch(addMonitoringPair(response.data));
         message.success(editingPair ? '更新成功' : '添加成功');
         setIsModalVisible(false);
@@ -193,6 +321,7 @@ const ArbitragePage: React.FC = () => {
         setEditingPair(null);
       }
     } catch (error: any) {
+      logger.error('操作失敗', error, 'ArbitragePage');
       message.error(error.message || '操作失敗');
     } finally {
       setLoading(false);
@@ -293,37 +422,17 @@ const ArbitragePage: React.FC = () => {
                       })
                 }</p>
               </Col>
-              <Col span={8}>
-                <p><strong>總投入額度:</strong> {
-                  Number(pair.totalAmount || 1000).toLocaleString()
-                }</p>
-              </Col>
-              <Col span={8}>
-                <p><strong>已用額度:</strong> {
-                  Number(pair.consumedAmount || 0).toLocaleString()
-                }</p>
-              </Col>
-            </Row>
-            <Row gutter={16} style={{ marginTop: 8 }}>
-              <Col span={24}>
-                <Progress 
-                  percent={Math.min(100, ((pair.consumedAmount || 0) / (pair.totalAmount || 1000)) * 100)} 
-                  size="small" 
-                  status={(pair.consumedAmount || 0) >= (pair.totalAmount || 1000) ? "success" : "active"}
-                  format={percent => `${percent?.toFixed(1)}% 已用`}
-                />
+              <Col span={16}>
+                <p><strong>執行模式:</strong> 
+                  <Tag color={pair.executionMode === 'auto' ? 'green' : 'blue'}>
+                    {pair.executionMode === 'auto' ? '自動執行' : '手動確認'}
+                  </Tag>
+                </p>
               </Col>
             </Row>
             <Row gutter={16} style={{ marginTop: 8 }}>
               <Col span={8}>
-                <p><strong>交易數量:</strong> {
-                  Number(pair.amount) % 1 === 0 
-                    ? pair.amount.toLocaleString()
-                    : pair.amount.toLocaleString(undefined, { 
-                        minimumFractionDigits: 0, 
-                        maximumFractionDigits: 8 
-                      })
-                }</p>
+                <p><strong>交易數量:</strong> {formatAmountWithCurrency(pair?.amount || 0, pair?.leg1?.symbol || pair?.leg2?.symbol || 'BTCUSDT')}</p>
               </Col>
               <Col span={8}>
                 <p><strong>觸發閾值:</strong> {pair.threshold}%</p>
@@ -451,36 +560,46 @@ const ArbitragePage: React.FC = () => {
     {
       title: 'Leg 1',
       key: 'leg1',
-      render: (record: any) => (
-        <Space direction="vertical" size="small">
-          <Text strong>{record.leg1.symbol}</Text>
-          <Text type="secondary" style={{ fontSize: '12px' }}>
-            {exchanges[record.leg1.exchange]?.name} {
-              record.leg1.type === 'spot' ? '現貨' : 
-              record.leg1.type === 'linear' ? '線性合約' : 
-              record.leg1.type === 'inverse' ? '反向合約' : 
-              record.leg1.type === 'future' ? '線性合約' : record.leg1.type
-            } · {record.leg1.side === 'sell' ? '賣出' : '買入'}
-          </Text>
-        </Space>
-      ),
+      render: (record: any) => {
+        if (!record.leg1) {
+          return <Text type="secondary">數據載入中...</Text>;
+        }
+        return (
+          <Space direction="vertical" size="small">
+            <Text strong>{record.leg1.symbol || 'N/A'}</Text>
+            <Text type="secondary" style={{ fontSize: '12px' }}>
+              {exchanges[record.leg1.exchange]?.name} {
+                record.leg1.type === 'spot' ? '現貨' : 
+                record.leg1.type === 'linear' ? '線性合約' : 
+                record.leg1.type === 'inverse' ? '反向合約' : 
+                record.leg1.type === 'future' ? '線性合約' : record.leg1.type
+              } · {record.leg1.side === 'sell' ? '賣出' : '買入'}
+            </Text>
+          </Space>
+        );
+      },
     },
     {
       title: 'Leg 2',
       key: 'leg2',
-      render: (record: any) => (
-        <Space direction="vertical" size="small">
-          <Text strong>{record.leg2.symbol}</Text>
-          <Text type="secondary" style={{ fontSize: '12px' }}>
-            {exchanges[record.leg2.exchange]?.name} {
-              record.leg2.type === 'spot' ? '現貨' : 
-              record.leg2.type === 'linear' ? '線性合約' : 
-              record.leg2.type === 'inverse' ? '反向合約' : 
-              record.leg2.type === 'future' ? '線性合約' : record.leg2.type
-            } · {record.leg2.side === 'sell' ? '賣出' : '買入'}
-          </Text>
-        </Space>
-      ),
+      render: (record: any) => {
+        if (!record.leg2) {
+          return <Text type="secondary">數據載入中...</Text>;
+        }
+        return (
+          <Space direction="vertical" size="small">
+            <Text strong>{record.leg2.symbol || 'N/A'}</Text>
+            <Text type="secondary" style={{ fontSize: '12px' }}>
+              {exchanges[record.leg2.exchange]?.name} {
+                record.leg2.type === 'spot' ? '現貨' : 
+                record.leg2.type === 'linear' ? '線性合約' : 
+                record.leg2.type === 'inverse' ? '反向合約' : 
+                record.leg2.type === 'future' ? '線性合約' : record.leg2.type
+              } · {record.leg2.side === 'sell' ? '賣出' : '買入'}
+            </Text>
+          </Space>
+        );
+      },
     },
     {
       title: '實時價格',
@@ -546,7 +665,7 @@ const ArbitragePage: React.FC = () => {
                     textAlign: 'center'
                   }}>
                     <div style={{ color: '#52c41a', fontWeight: '500' }}>
-                      {opportunity.leg1Price.bid1?.price.toFixed(4) || '-'}
+                      {opportunity.leg1Price.bid1?.price ? opportunity.leg1Price.bid1.price.toFixed(4) : '-'}
                     </div>
                     <div style={{ fontSize: '9px', color: '#999' }}>買</div>
                   </div>
@@ -558,7 +677,7 @@ const ArbitragePage: React.FC = () => {
                     textAlign: 'center'
                   }}>
                     <div style={{ color: '#ff4d4f', fontWeight: '500' }}>
-                      {opportunity.leg1Price.ask1?.price.toFixed(4) || '-'}
+                      {opportunity.leg1Price.ask1?.price ? opportunity.leg1Price.ask1.price.toFixed(4) : '-'}
                     </div>
                     <div style={{ fontSize: '9px', color: '#999' }}>賣</div>
                   </div>
@@ -619,7 +738,7 @@ const ArbitragePage: React.FC = () => {
                     textAlign: 'center'
                   }}>
                     <div style={{ color: '#52c41a', fontWeight: '500' }}>
-                      {opportunity.leg2Price.bid1?.price.toFixed(4) || '-'}
+                      {opportunity.leg2Price.bid1?.price ? opportunity.leg2Price.bid1.price.toFixed(4) : '-'}
                     </div>
                     <div style={{ fontSize: '9px', color: '#999' }}>買</div>
                   </div>
@@ -631,7 +750,7 @@ const ArbitragePage: React.FC = () => {
                     textAlign: 'center'
                   }}>
                     <div style={{ color: '#ff4d4f', fontWeight: '500' }}>
-                      {opportunity.leg2Price.ask1?.price.toFixed(4) || '-'}
+                      {opportunity.leg2Price.ask1?.price ? opportunity.leg2Price.ask1.price.toFixed(4) : '-'}
                     </div>
                     <div style={{ fontSize: '9px', color: '#999' }}>賣</div>
                   </div>
@@ -664,10 +783,10 @@ const ArbitragePage: React.FC = () => {
         return (
           <Space direction="vertical" size="small">
             <Text className={opportunity.spread > 0 ? 'price-positive' : 'price-negative'}>
-              {opportunity.spreadPercent.toFixed(3)}%
+              {opportunity.spreadPercent ? opportunity.spreadPercent.toFixed(3) : '-'}%
             </Text>
             <Text type="secondary" style={{ fontSize: '12px' }}>
-              {opportunity.spread.toFixed(6)}
+              {opportunity.spread ? opportunity.spread.toFixed(6) : '-'}
             </Text>
           </Space>
         );
@@ -681,16 +800,12 @@ const ArbitragePage: React.FC = () => {
     },
     {
       title: '交易數量',
-      dataIndex: 'amount',
       key: 'amount',
-      render: (amount: number) => {
-        // 如果是整數，顯示為整數；如果有小數，保留最多8位小數
-        return Number(amount) % 1 === 0 
-          ? amount.toLocaleString()
-          : amount.toLocaleString(undefined, { 
-              minimumFractionDigits: 0, 
-              maximumFractionDigits: 8 
-            });
+      render: (record: ArbitragePairExtended) => {
+        // 使用 leg1 的交易對符號來確定幣種，添加安全檢查
+        const symbol = record?.leg1?.symbol || record?.leg2?.symbol || 'BTCUSDT';
+        const amount = record?.amount || 0;
+        return formatAmountWithCurrency(amount, symbol);
       },
     },
     {
@@ -969,7 +1084,7 @@ const ArbitragePage: React.FC = () => {
           amount: 100.0, // 舊參數保留
           qty: 0.01,
           totalAmount: 1000,
-          executionMode: 'market',
+          executionMode: 'threshold',
         }}
         >
           {/* 常用交易對快捷選擇 */}
@@ -1171,32 +1286,12 @@ const ArbitragePage: React.FC = () => {
             </Col>
           </Row>
 
-          <Divider />
-
-
-            <Space>
-              <Form.Item
-                name="executionMode"
-                noStyle
-              >
-                <Switch
-                  checkedChildren="差價模式"
-                  unCheckedChildren="市價模式"
-                  checked={form.getFieldValue('executionMode') === 'threshold'}
-                  onChange={(checked) => {
-                    form.setFieldValue('executionMode', checked ? 'threshold' : 'market');
-                    message.info(`已切換為${checked ? '差價模式' : '市價模式'}`);
-                  }}
-                />
-              </Form.Item>
-
-            </Space>
+        <Divider />
 
 
           
           <Row gutter={16}>
             <Col span={8}>
-
               <Form.Item
                 name="qty"
                 label="每筆下單數量"
@@ -1212,45 +1307,10 @@ const ArbitragePage: React.FC = () => {
                   step={0.001}
                   precision={8}
                   style={{ width: '100%' }}
-                  placeholder="0.01"
+                  placeholder="1.0"
+                  addonAfter="幣"
                   formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
                   parser={value => Number(value!.replace(/\$\s?|(,*)/g, '')) as any}
-                />
-              </Form.Item>
-
-              <Form.Item
-                name="totalAmount"
-                label="總投入額度"
-                rules={[
-                  { required: true, message: '請輸入總投入額度' },
-                  { type: 'number', min: 1, message: '額度必須大於 1' }
-                ]}
-                extra="總計可用於套利的額度（如 USDT）"
-              >
-                <InputNumber
-                  min={1}
-                  max={1000000}
-                  step={1}
-                  style={{ width: '100%' }}
-                  placeholder="1000"
-                  formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                  parser={value => Number(value!.replace(/\$\s?|(,*)/g, '')) as any}
-                />
-              </Form.Item>
-
-              <Form.Item
-                name="threshold"
-                label="觸發閾值 (%)"
-                rules={[{ required: true, message: '請輸入觸發閾值' }]}
-              >
-                <InputNumber
-                  min={0.001}
-                  max={10}
-                  step={0.01}
-                  precision={2}
-                  style={{ width: '100%' }}
-                  placeholder="0.10"
-                  disabled={form.getFieldValue('executionMode') !== 'threshold'}
                 />
               </Form.Item>
             </Col>
@@ -1259,12 +1319,10 @@ const ArbitragePage: React.FC = () => {
               <Form.Item
                 name="amount"
                 label="交易數量"
-                tooltip="已棄用，請使用「每筆下單數量」和「總投入額度」"
                 rules={[
                   { required: true, message: '請輸入交易數量' },
                   { type: 'number', min: 0.001, message: '數量必須大於 0.001' }
                 ]}
-                extra="舊版參數，建議改用上方新參數"
               >
                 <InputNumber
                   min={0.001}
@@ -1272,24 +1330,56 @@ const ArbitragePage: React.FC = () => {
                   step={0.001}
                   precision={8}
                   style={{ width: '100%' }}
-                  placeholder="100.0"
+                  placeholder="1.0"
+                  addonAfter="幣"
                   formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
                   parser={value => Number(value!.replace(/\$\s?|(,*)/g, '')) as any}
                 />
               </Form.Item>
             </Col>
 
-
             <Col span={8}>
               <Form.Item
-                name="enabled"
-                label="啟用狀態"
-                valuePropName="checked"
+                name="threshold"
+                label={
+                  <Space>
+                    <span>觸發閾值 (%)</span>
+                    <Form.Item name="executionMode" noStyle>
+                      <Switch
+                        checkedChildren="差價模式"
+                        unCheckedChildren="市價模式"
+                        onChange={(checked) => {
+                          // 強制重新渲染表單項
+                          form.setFieldsValue({ executionMode: checked });
+                          form.validateFields(['threshold']);
+                          message.info(`已切換為${checked ? '差價模式' : '市價模式'}`);
+                        }}
+                        size="small"
+                      />
+                    </Form.Item>
+                  </Space>
+                }
+                rules={[{ required: true, message: '請輸入觸發閾值' }]}
+                initialValue={0.1}
               >
-                <Switch checkedChildren="啟用" unCheckedChildren="停用" />
+                <Form.Item shouldUpdate={(prevValues, currentValues) => prevValues.executionMode !== currentValues.executionMode}>
+                  {({ getFieldValue }) => (
+                    <InputNumber
+                      min={0.001}
+                      max={10}
+                      step={0.01}
+                      precision={2}
+                      style={{ width: '100%' }}
+                      placeholder="0.10"
+                      disabled={!getFieldValue('executionMode')}
+                    />
+                  )}
+                </Form.Item>
               </Form.Item>
             </Col>
+
           </Row>
+
 
           <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
             <Space>

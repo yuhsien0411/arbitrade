@@ -4,6 +4,7 @@
 
 import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
 import { apiService } from '../../services/api';
+import logger from '../../utils/logger';
 
 interface ArbitragePair {
   id: string;
@@ -82,12 +83,15 @@ export const addWatchPairThunk = createAsyncThunk(
   'arbitrage/addWatchPair',
   async (payload: any, { rejectWithValue }) => {
     try {
+      logger.info('開始添加監控交易對', payload, 'Redux');
       const res = await apiService.addWatchPair(payload);
+      logger.info('添加監控交易對響應', res, 'Redux');
       if ((res as any)?.success === false) {
         return rejectWithValue((res as any)?.error || '添加失敗');
       }
       return (res as any).data || res;
     } catch (e: any) {
+      logger.error('添加監控交易對失敗', e, 'Redux');
       return rejectWithValue(e.message || '添加失敗');
     }
   }
@@ -191,13 +195,16 @@ const arbitrageSlice = createSlice({
   extraReducers: (builder) => {
     builder
       .addCase(addWatchPairThunk.fulfilled, (state, action: PayloadAction<any>) => {
+        logger.info('監控交易對添加成功', action.payload, 'Redux');
         if (action.payload) {
           const pair = action.payload;
           const existingIndex = state.monitoringPairs.findIndex(p => p.id === pair.id);
           if (existingIndex >= 0) {
             state.monitoringPairs[existingIndex] = pair;
+            logger.info('更新現有監控交易對', pair.id, 'Redux');
           } else {
             state.monitoringPairs.push(pair);
+            logger.info('新增監控交易對', pair.id, 'Redux');
           }
         }
       });

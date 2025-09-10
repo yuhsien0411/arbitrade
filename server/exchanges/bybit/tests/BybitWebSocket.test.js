@@ -22,3 +22,4 @@ describe('BybitWebSocket', () => {
     expect(ws.getSubscriptions()).not.toContain('tickers.BTCUSDT');
   });
 });
+

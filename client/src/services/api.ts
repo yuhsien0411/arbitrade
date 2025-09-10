@@ -4,6 +4,7 @@
  */
 
 import axios from 'axios';
+import logger from '../utils/logger';
 
 // 創建axios實例
 const api = axios.create({
@@ -17,11 +18,20 @@ const api = axios.create({
 // 請求攔截器
 api.interceptors.request.use(
   (config) => {
-    console.log(`API請求: ${config.method?.toUpperCase()} ${config.url}`);
+    logger.info('API Request', {
+      method: config.method?.toUpperCase(),
+      url: config.url,
+      baseURL: config.baseURL,
+      fullURL: `${config.baseURL}${config.url}`,
+      data: config.data,
+      params: config.params,
+      headers: config.headers,
+      timestamp: new Date().toISOString()
+    }, 'API');
     return config;
   },
   (error) => {
-    console.error('API請求錯誤:', error);
+    logger.error('API Request Error', error, 'API');
     return Promise.reject(error);
   }
 );
@@ -29,10 +39,27 @@ api.interceptors.request.use(
 // 響應攔截器
 api.interceptors.response.use(
   (response) => {
+    logger.info('API Response', {
+      method: response.config.method?.toUpperCase(),
+      url: response.config.url,
+      status: response.status,
+      statusText: response.statusText,
+      data: response.data,
+      responseTime: response.headers['x-response-time'] || 'N/A',
+      timestamp: new Date().toISOString()
+    }, 'API');
     return response.data;
   },
   (error) => {
-    console.error('API響應錯誤:', error);
+    logger.error('API Response Error', {
+      method: error.config?.method?.toUpperCase() || 'UNKNOWN',
+      url: error.config?.url || 'UNKNOWN',
+      status: error.response?.status || 'NO_RESPONSE',
+      statusText: error.response?.statusText || 'NETWORK_ERROR',
+      message: error.message,
+      responseData: error.response?.data,
+      timestamp: new Date().toISOString()
+    }, 'API');
     
     // 統一錯誤處理
     const errorMessage = error.response?.data?.error || error.message || '網路錯誤';
@@ -156,8 +183,16 @@ export const apiService = {
   deleteApiSettings: (exchange: string) =>
     api.delete(`/api/settings/api/${exchange}`),
 
-  testApiConnection: () =>
-    api.get('/api/settings/api/test'),
+  testApiConnection: async () => {
+    try {
+      const response = await api.get('/api/settings/api/test');
+      console.log('API 測試響應:', response);
+      return response;
+    } catch (error) {
+      console.error('API 測試錯誤:', error);
+      throw error;
+    }
+  },
   
   // 統計數據
   getStats: () => api.get('/stats'),
