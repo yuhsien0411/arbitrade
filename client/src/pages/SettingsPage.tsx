@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Row, Col, Card, Form, InputNumber, Button, Space, Typography, 
-  Divider, Alert, Switch, Input, Tabs, Modal, Select, List, Tag, Popconfirm, App as AntdApp
+  Divider, Alert, Input, Tabs, Modal, Select, List, Tag, Popconfirm, App as AntdApp
 } from 'antd';
 import { 
   SafetyOutlined, ApiOutlined, SettingOutlined, 
@@ -121,7 +121,7 @@ const SettingsPage: React.FC = () => {
 
       const response = await apiService.updateRiskSettings(settings) as unknown as ApiResponse;
       
-      if (response.success) {
+      if ((response as any).success) {
         dispatch(updateRiskLimits(settings));
         message.success('風險控制設定已保存');
       }
@@ -133,69 +133,48 @@ const SettingsPage: React.FC = () => {
   };
 
 
-  // 載入API配置列表
+  // 載入API配置列表（從 .env 環境變數讀取）
   const loadApiConfigs = async () => {
     try {
       const response = await apiService.getApiSettings();
       logger.info('API Settings Response', response, 'SettingsPage');
       
-      if (response.data) {
+      if (response && response.data) {
         const configs = [];
         
         logger.info('API Settings Data', response.data, 'SettingsPage');
         
-        // 檢查Bybit配置
-        if (response.data.bybit && response.data.bybit.apiKey) {
+        // 檢查Bybit配置（使用 hasApiKey 和 hasSecret 判斷）
+        if (response.data.bybit && (response.data.bybit.hasApiKey || response.data.bybit.connected)) {
           logger.info('Adding Bybit config', null, 'SettingsPage');
           configs.push({
             id: 'bybit',
             exchange: 'bybit',
             name: 'Bybit',
             icon: '🟡',
-            status: 'configured', // 改為已配置狀態，而不是連接狀態
-            connected: false // 默認為未連接，需要測試後才能確認
+            status: response.data.bybit.connected ? 'connected' : 'configured',
+            connected: response.data.bybit.connected,
+            hasApiKey: response.data.bybit.hasApiKey,
+            hasSecret: response.data.bybit.hasSecret
           });
         }
         
         // 檢查Binance配置
-        if (response.data.binance && response.data.binance.apiKey) {
+        if (response.data.binance && (response.data.binance.hasApiKey || response.data.binance.connected)) {
           logger.info('Adding Binance config', null, 'SettingsPage');
           configs.push({
             id: 'binance',
             exchange: 'binance',
             name: 'Binance',
             icon: '🟨',
-            status: 'configured',
-            connected: false // 暫時設為false，等待實現
+            status: response.data.binance.connected ? 'connected' : 'configured',
+            connected: response.data.binance.connected,
+            hasApiKey: response.data.binance.hasApiKey,
+            hasSecret: response.data.binance.hasSecret
           });
         }
         
-        // 檢查OKX配置
-        if (response.data.okx && response.data.okx.apiKey) {
-          logger.info('Adding OKX config', null, 'SettingsPage');
-          configs.push({
-            id: 'okx',
-            exchange: 'okx',
-            name: 'OKX',
-            icon: '⚫',
-            status: 'configured',
-            connected: false // 暫時設為false，等待實現
-          });
-        }
-        
-        // 檢查Bitget配置
-        if (response.data.bitget && response.data.bitget.apiKey) {
-          logger.info('Adding Bitget config', null, 'SettingsPage');
-          configs.push({
-            id: 'bitget',
-            exchange: 'bitget',
-            name: 'Bitget',
-            icon: '🔵',
-            status: 'configured',
-            connected: false // 暫時設為false，等待實現
-          });
-        }
-        
+        // OKX 和 Bitget 暫時不支援，保持開發中狀態
         logger.info('Final configs', configs, 'SettingsPage');
         setApiConfigs(configs);
       } else {
@@ -220,14 +199,27 @@ const SettingsPage: React.FC = () => {
     try {
       setLoading(true);
       const response = await apiService.getApiSettingsForEdit();
-      if (response.data) {
+      if (response) {
         setEditingApi(config);
         
-        if (config.exchange === 'bybit') {
+        if (config.exchange === 'bybit' && response.data.bybit) {
           apiForm.setFieldsValue({
             exchange: 'bybit',
-            apiKey: (response.data.bybit && response.data.bybit.apiKey) || '',
-            secret: (response.data.bybit && response.data.bybit.secret) || '',
+            apiKey: response.data.bybit.apiKey || '', // 顯示現有的API Key
+            secret: response.data.bybit.secret || '', // 顯示現有的Secret
+          });
+        } else if (config.exchange === 'binance' && response.data.binance) {
+          apiForm.setFieldsValue({
+            exchange: 'binance',
+            apiKey: response.data.binance.apiKey || '', // 顯示現有的API Key
+            secret: response.data.binance.secret || '', // 顯示現有的Secret
+          });
+        } else {
+          // 如果沒有找到對應的交易所配置，清空表單
+          apiForm.setFieldsValue({
+            exchange: config.exchange,
+            apiKey: '',
+            secret: '',
           });
         }
         
@@ -245,25 +237,23 @@ const SettingsPage: React.FC = () => {
     try {
       setLoading(true);
       
-      if (config.exchange === 'bybit') {
-        // 調用專門的刪除API端點
-        const response = await apiService.deleteApiSettings('bybit');
+      logger.info('Deleting API settings for exchange', config.exchange, 'SettingsPage');
+      
+      const response = await apiService.deleteApiSettings(config.exchange);
+      
+      logger.info('API settings delete response', response, 'SettingsPage');
+      
+      if ((response as any).success) {
+        message.success(`已刪除 ${config.name} API配置`);
         
-        if (response.data) {
-          message.success(`已刪除 ${config.name} API配置`);
-          
-          // 從本地狀態中移除該配置
-          setApiConfigs(prevConfigs => 
-            prevConfigs.filter(cfg => cfg.exchange !== 'bybit')
-          );
-        } else {
-          message.error('刪除API配置失敗：服務器回應異常');
-        }
+        // 重新載入 API 配置列表
+        await loadApiConfigs();
       } else {
-        message.info(`${config.name} 刪除功能開發中，暫時無法使用。`);
+        message.error('刪除API配置失敗：服務器回應異常');
       }
       
     } catch (error: any) {
+      logger.error('API settings delete error', error, 'SettingsPage');
       message.error('刪除API配置失敗: ' + (error.message || '未知錯誤'));
     } finally {
       setLoading(false);
@@ -276,27 +266,37 @@ const SettingsPage: React.FC = () => {
       setLoading(true);
       
       const { exchange, apiKey, secret } = values;
-      // passphrase 暫時不使用，為未來的 OKX/Bitget 預留
       const exchangeInfo = supportedExchanges.find(e => e.key === exchange);
       
-      if (exchange === 'bybit') {
-        await apiService.updateApiSettings({
-          bybitApiKey: apiKey,
-          bybitSecret: secret,
-          bybitTestnet: false
-        });
+      // 準備 API 設定資料
+      const apiSettings: any = {
+        [exchange]: {}
+      };
+      
+      // 只有當用戶輸入值時才添加
+      if (apiKey && apiKey.trim() !== '') {
+        apiSettings[exchange].apiKey = apiKey.trim();
+      }
+      if (secret && secret.trim() !== '') {
+        apiSettings[exchange].secret = secret.trim();
+      }
+      
+      logger.info('Sending API settings update', apiSettings, 'SettingsPage');
+      
+      const response = await apiService.updateApiSettings(apiSettings);
+      
+      logger.info('API settings update response', response, 'SettingsPage');
+      
+      if ((response as any).success) {
         message.success(`${exchangeInfo?.name} API配置已保存`);
         setIsApiModalVisible(false);
-        loadApiConfigs();
+        await loadApiConfigs(); // 重新載入配置列表
       } else {
-        // 其他交易所暫時不支援，顯示提示信息
-        message.warning(`${exchangeInfo?.name} 功能開發中，暫時無法保存配置。請期待後續版本！`);
-        
-        // 關閉模態框但不保存
-        setIsApiModalVisible(false);
+        message.error((response as any).error || '保存API配置失敗');
       }
       
     } catch (error: any) {
+      logger.error('API settings update error', error, 'SettingsPage');
       message.error('保存API配置失敗: ' + (error.message || '未知錯誤'));
     } finally {
       setLoading(false);
@@ -308,125 +308,94 @@ const SettingsPage: React.FC = () => {
     try {
       setLoading(true);
       
-      if (config.exchange === 'bybit') {
-        const response = await apiService.testApiConnection();
-        const responseData = response;
-        logger.info('API Test Response', responseData, 'SettingsPage');
+      const response = await apiService.testApiConnection(config.exchange);
+      const responseData = response.data;
+      logger.info('API Test Response', responseData, 'SettingsPage');
+      
+      // 檢查後端實際返回的成功響應格式
+      if (responseData && responseData.connected) {
+        const connectedExchanges = responseData.exchanges || [];
+        const testResults = responseData.test_results || {};
         
-        // 檢查後端實際返回的成功響應格式
-        if (responseData && responseData.data && responseData.data.connected) {
-          const { accountInfo } = responseData.data;
+        // 更新本地狀態 - 將連接狀態設為true
+        setApiConfigs(prevConfigs => 
+          prevConfigs.map(cfg => 
+            connectedExchanges.includes(cfg.exchange)
+              ? { ...cfg, connected: true, status: 'connected' }
+              : cfg
+          )
+        );
+        
+        // 顯示詳細的帳戶狀態信息
+        let accountStatusMessage = `${config.name} API 連接測試成功！\n\n`;
+        
+        // 處理測試結果（現在只測試一個交易所）
+        const testResult = testResults[config.exchange];
+        if (testResult && testResult.success && testResult.account_info) {
+          const accountInfo = testResult.account_info;
           
-          // 更新本地狀態 - 將連接狀態設為true
-          setApiConfigs(prevConfigs => 
-            prevConfigs.map(cfg => 
-              cfg.exchange === 'bybit' 
-                ? { ...cfg, connected: true, status: 'connected' }
-                : cfg
-            )
-          );
-          
-          if (accountInfo) {
-            // 顯示詳細的賬戶信息
-            Modal.success({
-              title: `${config.name} API測試成功`,
-              width: 600,
-              content: (
-                <div>
-                  <p><strong>連接狀態：</strong>✅ 連接成功</p>
-                  <p><strong>服務器時間：</strong>{new Date(responseData.data.serverTime * 1000).toLocaleString()}</p>
-                  
-                  <Divider />
-                  <h4>📊 賬戶配置信息</h4>
-                  
-                  <Row gutter={[16, 8]}>
-                    <Col span={12}>
-                      <strong>保證金模式：</strong>
-                    </Col>
-                    <Col span={12}>
-                      <Tag color="blue">{accountInfo.marginModeText}</Tag>
-                    </Col>
-                    
-                    <Col span={12}>
-                      <strong>賬戶類型：</strong>
-                    </Col>
-                    <Col span={12}>
-                      <Tag color={
-                        accountInfo.unifiedMarginStatus === 1 ? 'default' :     // 經典帳戶
-                        accountInfo.unifiedMarginStatus === 3 ? 'blue' :        // 統一帳戶1.0
-                        accountInfo.unifiedMarginStatus === 4 ? 'cyan' :        // 統一帳戶1.0 (pro)
-                        accountInfo.unifiedMarginStatus === 5 ? 'green' :       // 統一帳戶2.0
-                        accountInfo.unifiedMarginStatus === 6 ? 'purple' :      // 統一帳戶2.0 (pro)
-                        'orange'                                                // 未知狀態
-                      }>
-                        {accountInfo.unifiedMarginStatusText}
-                      </Tag>
-                    </Col>
-                    
-                    <Col span={12}>
-                      <strong>帶單賬戶：</strong>
-                    </Col>
-                    <Col span={12}>
-                      <Tag color={accountInfo.isMasterTrader ? 'green' : 'default'}>
-                        {accountInfo.isMasterTrader ? '是' : '否'}
-                      </Tag>
-                    </Col>
-                    
-                    <Col span={12}>
-                      <strong>現貨對衝：</strong>
-                    </Col>
-                    <Col span={12}>
-                      <Tag color={accountInfo.spotHedgingStatus === 'ON' ? 'green' : 'default'}>
-                        {accountInfo.spotHedgingStatusText}
-                      </Tag>
-                    </Col>
-                    
-                    <Col span={24} style={{ marginTop: '8px' }}>
-                      <Typography.Text type="secondary">
-                        賬戶更新時間：{new Date(parseInt(accountInfo.updatedTime)).toLocaleString()}
-                      </Typography.Text>
-                    </Col>
-                  </Row>
-                </div>
-              )
-            });
-          } else {
-            message.success(`${config.name} API連接測試`);
+          if (config.exchange === 'bybit') {
+            accountStatusMessage += `🟡 Bybit 帳戶狀態：\n`;
+            accountStatusMessage += `• 保證金模式：${accountInfo.marginModeText || accountInfo.marginMode}\n`;
+            accountStatusMessage += `• 帳戶類型：${accountInfo.unifiedMarginStatusText || accountInfo.unifiedMarginStatus}\n`;
+            accountStatusMessage += `• 帶單帳戶：${accountInfo.isMasterTrader ? '是' : '否'}\n`;
+            accountStatusMessage += `• 現貨對衝：${accountInfo.spotHedgingStatusText || (accountInfo.spotHedgingStatus === 'ON' ? '已開啟' : '未開啟')}\n`;
+            accountStatusMessage += `• 更新時間：${accountInfo.updatedTime ? new Date(parseInt(accountInfo.updatedTime)).toLocaleString() : '未知'}\n\n`;
+          } else if (config.exchange === 'binance') {
+            accountStatusMessage += `🟨 Binance 帳戶狀態：\n`;
+            accountStatusMessage += `• 帳戶類型：${accountInfo.accountType || '未知'}\n`;
+            accountStatusMessage += `• 交易權限：${accountInfo.canTrade ? '是' : '否'}\n`;
+            accountStatusMessage += `• 提現權限：${accountInfo.canWithdraw ? '是' : '否'}\n`;
+            accountStatusMessage += `• 充值權限：${accountInfo.canDeposit ? '是' : '否'}\n`;
+            accountStatusMessage += `• Maker 手續費：${accountInfo.makerCommission}%\n`;
+            accountStatusMessage += `• Taker 手續費：${accountInfo.takerCommission}%\n`;
+            if (accountInfo.balances && accountInfo.balances.length > 0) {
+              accountStatusMessage += `• 主要餘額：\n`;
+              accountInfo.balances.slice(0, 3).forEach((balance: any) => {
+                if (parseFloat(balance.free) > 0) {
+                  accountStatusMessage += `  - ${balance.asset}: ${balance.free}\n`;
+                }
+              });
+            }
+            accountStatusMessage += `\n`;
           }
-        } else {
-          // 更新本地狀態 - 將連接狀態設為false
-          setApiConfigs(prevConfigs => 
-            prevConfigs.map(cfg => 
-              cfg.exchange === 'bybit' 
-                ? { ...cfg, connected: false, status: 'disconnected' }
-                : cfg
-            )
-          );
-          
-          const errorMsg = responseData.data?.message || 'API連接測試失敗';
-
-          Modal.error({
-            title: `${config.name} API測試失敗`,
-            width: 500,
-            content: (
-              <div>
-                <p><strong>錯誤信息：</strong>{errorMsg}</p>
-                <p style={{ marginTop: '12px', color: '#666', fontSize: '12px' }}>
-                  請檢查：<br/>
-                  • API 密鑰是否正確配置<br/>
-                  • API 密鑰是否具有必要的權限<br/>
-                  • 網路連接是否正常
-                </p>
-              </div>
-            )
-          });
         }
+        
+        // 顯示成功消息和帳戶狀態
+        message.success({
+          content: accountStatusMessage,
+          duration: 10, // 顯示10秒
+          style: { whiteSpace: 'pre-line' } // 支持換行
+        });
+        
+        // 重新載入配置列表以更新狀態
+        await loadApiConfigs();
       } else {
-        // 其他交易所暫時不支援測試
-        message.info(`${config.name} 測試功能開發中，暫時無法使用。請期待後續版本！`);
+        // 顯示失敗的詳細信息
+        const testResults = responseData?.test_results || {};
+        let errorMessage = `${config.name} API 連接測試失敗！\n\n`;
+        
+        const testResult = testResults[config.exchange];
+        if (testResult && !testResult.success) {
+          errorMessage += `${testResult.message}\n`;
+          if (testResult.error_code) {
+            errorMessage += `錯誤代碼: ${testResult.error_code}\n`;
+          }
+        }
+        
+        message.error({
+          content: errorMessage,
+          duration: 8,
+          style: { whiteSpace: 'pre-line' }
+        });
+        
+        // 重新載入配置列表以更新狀態
+        await loadApiConfigs();
       }
+      
     } catch (error: any) {
-      message.error(`${config.name} API連接測試失敗: ` + (error.message || '未知錯誤'));
+      logger.error('API Test Error', error, 'SettingsPage');
+      message.error(`API 連接測試失敗: ${error.message || '未知錯誤'}`);
     } finally {
       setLoading(false);
     }
@@ -596,10 +565,29 @@ const SettingsPage: React.FC = () => {
                   新增 API
                 </Button>
                 <Typography.Text type="secondary">
-                  管理您的交易所API密鑰配置
+                  管理您的交易所API密鑰配置（透過 .env 檔案）
                 </Typography.Text>
               </Space>
             </div>
+
+            {/* .env 設定提示 */}
+            <Alert
+              message="API 金鑰管理方式已更新"
+              description={
+                <div>
+                  <p>API 金鑰現在透過 .env 檔案管理，提供更安全的方式：</p>
+                  <ul>
+                    <li>✅ 金鑰不會被提交到版本控制</li>
+                    <li>✅ 支援不同環境的設定</li>
+                    <li>✅ 更安全的敏感資訊管理</li>
+                  </ul>
+                  <p>請編輯專案根目錄的 .env 檔案來設定 API 金鑰</p>
+                </div>
+              }
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
 
             {/* API配置列表 */}
             {apiConfigs.length > 0 ? (
@@ -648,10 +636,10 @@ const SettingsPage: React.FC = () => {
                         <Space>
                           <span>{config.name}</span>
                           <Tag 
-                            color={config.connected ? 'green' : 'orange'}
+                            color={config.connected ? 'green' : config.hasApiKey ? 'blue' : 'orange'}
                             icon={config.connected ? <CheckCircleOutlined /> : <CloseCircleOutlined />}
                           >
-                            {config.connected ? '已連接' : '未連接'}
+                            {config.connected ? '已連接' : config.hasApiKey ? '已配置' : '未配置'}
                           </Tag>
                         </Space>
                       }
@@ -669,7 +657,7 @@ const SettingsPage: React.FC = () => {
                 <ApiOutlined style={{ fontSize: '48px', marginBottom: '16px' }} />
                 <div>尚未配置任何API</div>
                 <div style={{ fontSize: '12px', marginTop: '8px' }}>
-                  點擊「新增 API」按鈕開始配置您的交易所API
+                  請在 .env 檔案中設定 API 金鑰，或點擊「新增 API」查看設定說明
                 </div>
               </div>
             )}
@@ -747,17 +735,17 @@ const SettingsPage: React.FC = () => {
               <Form.Item
                 name="apiKey"
                 label="API Key"
-                rules={[{ required: true, message: '請輸入API Key' }]}
+                rules={[]}
               >
-                <Input.Password placeholder="請輸入API Key" />
+                <Input.Password placeholder="請輸入API Key（編輯時會顯示現有設定）" />
               </Form.Item>
 
               <Form.Item
                 name="secret"
                 label="Secret Key"
-                rules={[{ required: true, message: '請輸入Secret Key' }]}
+                rules={[]}
               >
-                <Input.Password placeholder="請輸入Secret Key" />
+                <Input.Password placeholder="請輸入Secret Key（編輯時會顯示現有設定）" />
               </Form.Item>
 
               <Form.Item shouldUpdate={(prevValues, currentValues) => prevValues.exchange !== currentValues.exchange}>

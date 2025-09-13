@@ -65,6 +65,26 @@ class ArbitrageSimulator:
         except Exception as e:
             print(f"❌ 獲取交易所狀態錯誤: {e}")
             return []
+
+    def get_ticker(self, exchange="binance", symbol="BTCUSDT", category="spot"):
+        """測試獲取公開 ticker（最優買一/賣一）"""
+        try:
+            url = f"{self.base_url}/api/ticker/{exchange}/{symbol}?category={category}"
+            resp = self.session.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                tk = data.get("data", {})
+                bid = tk.get("bid1", {}).get("price")
+                ask = tk.get("ask1", {}).get("price")
+                cached = data.get("cached") or data.get("fallback")
+                print(f"📈 {exchange.upper()} {symbol} ({category}) bid/ask = {bid} / {ask}  {'[cached]' if cached else ''}")
+                return tk
+            else:
+                print(f"❌ 獲取 ticker 失敗: {resp.status_code} - {resp.text}")
+                return None
+        except Exception as e:
+            print(f"❌ 獲取 ticker 錯誤: {e}")
+            return None
     
     def add_monitoring_pair(self, pair_config):
         """添加監控交易對"""
@@ -139,6 +159,11 @@ class ArbitrageSimulator:
         # 獲取交易所狀態
         exchanges = self.get_exchanges()
         
+        # 先測試幣安/拜比特公開 ticker
+        self.get_ticker("binance", "BTCUSDT", "spot")
+        self.get_ticker("binance", "BTCUSDT", "futures")
+        self.get_ticker("bybit", "BTCUSDT", "spot")
+
         # 獲取賬戶信息
         self.get_account_info("bybit")
         
@@ -155,9 +180,9 @@ class ArbitrageSimulator:
                     "qty": 0.001
                 },
                 "leg2": {
-                    "exchange": "binance", 
+                    "exchange": "bybit",
                     "symbol": "BTCUSDT",
-                    "type": "linear",
+                    "type": "spot",
                     "side": "sell",
                     "qty": 0.001
                 },
@@ -165,49 +190,8 @@ class ArbitrageSimulator:
                 "amount": 100.0,
                 "enabled": True,
                 "createdAt": int(time.time() * 1000)
-            },
-            {
-                "id": f"pair_{current_time}_1",
-                "leg1": {
-                    "exchange": "bybit",
-                    "symbol": "ETHUSDT", 
-                    "type": "linear",
-                    "side": "buy",
-                    "qty": 0.01
-                },
-                "leg2": {
-                    "exchange": "binance",
-                    "symbol": "ETHUSDT",
-                    "type": "linear",
-                    "side": "sell", 
-                    "qty": 0.01
-                },
-                "threshold": 1.3,
-                "amount": 50.0,
-                "enabled": True,
-                "createdAt": int(time.time() * 1000)
-            },
-            {
-                "id": f"pair_{current_time}_2",
-                "leg1": {
-                    "exchange": "bybit",
-                    "symbol": "SOLUSDT",
-                    "side": "buy",
-                    "qty": 0.01,
-                    "type": "linear"
-                },
-                "leg2": {
-                    "exchange": "bybit",
-                    "symbol": "SOLUSDT",
-                    "side": "sell",
-                    "qty": 0.01,
-                    "type": "spot"
-                },
-                "threshold": 0.5,
-                "amount": 0.01,
-                "enabled": True,
-                "createdAt": int(time.time() * 1000)
-            }   
+            }
+  
 
         ]
 

@@ -5,6 +5,7 @@
  */
 
 const express = require('express');
+const BinancePublicClient = require('../exchanges/binance/BinancePublicClient');
 const router = express.Router();
 const { getArbitrageEngine } = require('../services/arbitrageEngine');
 const { ArbitragePair, Trade, PriceData } = require('../models');
@@ -663,6 +664,10 @@ router.get('/exchanges/:exchange/features/:feature', (req, res) => {
 router.get('/prices/:exchange/:symbol', requireEngine, async (req, res) => {
     try {
         const { exchange, symbol } = req.params;
+        // 禁用 binance endpoints（保留但不可用）
+        if (exchange === 'binance') {
+            return res.status(410).json({ success: false, error: 'Binance endpoint disabled' });
+        }
         const cacheKey = apiCache.generateKey(`price:${exchange}:${symbol}`);
 
         // 先查緩存
@@ -673,17 +678,26 @@ router.get('/prices/:exchange/:symbol', requireEngine, async (req, res) => {
         
         if (exchange === 'bybit') {
             const orderBook = await req.engine.exchanges.bybit.getOrderBook(symbol);
-            await apiCache.set(cacheKey, orderBook, 2); // 2秒TTL
+            await apiCache.set(cacheKey, orderBook, 1); // 1秒TTL，更快的價格更新
             res.json({
                 success: true,
-                data: orderBook
+                data: orderBook,
+                timestamp: Date.now()
             });
-        } else if (exchange === 'binance' && req.engine.exchanges.binance) {
-            const orderBook = await req.engine.exchanges.binance.getOrderBook(symbol, 'spot');
-            await apiCache.set(cacheKey, orderBook, 2);
+        } else if (exchange === 'binance') {
+            let orderBook;
+            if (req.engine.exchanges.binance) {
+                orderBook = await req.engine.exchanges.binance.getOrderBook(symbol, 'spot');
+            } else {
+                // 後備：使用公開客戶端獲取訂單簿（無需 API Key）
+                const publicClient = new BinancePublicClient();
+                orderBook = await publicClient.getOrderBook(symbol, 100);
+            }
+            await apiCache.set(cacheKey, orderBook, 1); // 1秒TTL
             res.json({
                 success: true,
-                data: orderBook
+                data: orderBook,
+                timestamp: Date.now()
             });
         } else {
             return res.status(400).json({
@@ -693,11 +707,120 @@ router.get('/prices/:exchange/:symbol', requireEngine, async (req, res) => {
         }
 
     } catch (error) {
-        logger.error(`獲取價格數據失敗 ${req.params.exchange}/${req.params.symbol}:`, error);
+        // 只在非快取命中時記錄錯誤，避免重複日誌
+        if (!req.query.cached) {
+            logger.error(`獲取價格數據失敗 ${req.params.exchange}/${req.params.symbol}:`, error);
+        }
         res.status(500).json({
             success: false,
             error: error.message
         });
+    }
+});
+
+/**
+ * 獲取公開 ticker (bid/ask 最優價)
+ * GET /api/ticker/:exchange/:symbol?category=spot|linear
+ */
+router.get('/ticker/:exchange/:symbol', requireEngine, async (req, res) => {
+    try {
+        const { exchange, symbol } = req.params;
+        const category = (req.query.category || 'spot').toString();
+        // 禁用 binance endpoints（保留但不可用）
+        if (exchange === 'binance') {
+            return res.status(410).json({ success: false, error: 'Binance endpoint disabled' });
+        }
+        const cacheKey = apiCache.generateKey(`ticker:${exchange}:${category}:${symbol}`);
+
+        const cached = await apiCache.get(cacheKey);
+        if (cached) {
+            return res.json({ success: true, data: cached, cached: true });
+        }
+
+        if (exchange === 'binance') {
+            let ticker;
+            const publicClient = new BinancePublicClient();
+            const isFutures = (category === 'futures');
+            if (isFutures) {
+                const fut = await publicClient.getFuturesBookTicker(symbol);
+                if (!fut.success) {
+                    return res.status(502).json({ success: false, error: fut.error || 'Binance 期貨 ticker 失敗' });
+                }
+                ticker = fut.data;
+            } else {
+                if (req.engine.exchanges.binance && req.engine.exchanges.binance.restClient?.getBookTicker) {
+                    ticker = await req.engine.exchanges.binance.restClient.getBookTicker(symbol);
+                } else {
+                    const spot = await publicClient.getTicker(symbol);
+                    if (!spot.success) {
+                        return res.status(502).json({ success: false, error: spot.error || 'Binance 現貨 ticker 失敗' });
+                    }
+                    ticker = spot.data;
+                }
+            }
+
+            let data = {
+                symbol: ticker.symbol,
+                exchange: isFutures ? 'binance-futures' : 'binance',
+                bid1: { price: Number(ticker.bidPrice), amount: Number(ticker.bidQty || 0) },
+                ask1: { price: Number(ticker.askPrice), amount: Number(ticker.askQty || 0) },
+                ts: ticker.timestamp || Date.now(),
+                source: 'bookTicker'
+            };
+
+            // 若取得價格為 0，使用快取回退，不覆蓋快取
+            const isInvalid = (!data.bid1?.price || data.bid1.price <= 0) && (!data.ask1?.price || data.ask1.price <= 0);
+            if (isInvalid) {
+                const cached = await apiCache.get(cacheKey);
+                if (cached) {
+                    return res.json({ success: true, data: cached, cached: true, fallback: true });
+                }
+                // 無快取則仍回傳原始但標記無效，讓前端自行處理
+                return res.json({ success: true, data, invalid: true });
+            }
+
+            await apiCache.set(cacheKey, data, 1);
+            return res.json({ success: true, data });
+        }
+
+        if (exchange === 'bybit') {
+            // 使用公共 orderbook 近似 ticker
+            const obRes = await req.engine.exchanges.bybit.getOrderBook(symbol, category === 'spot' ? 'spot' : 'linear');
+            if (!obRes || !obRes.success || !obRes.data) {
+                return res.status(502).json({ success: false, error: 'Bybit 公開數據不可用' });
+            }
+            const raw = obRes.data;
+            const bids = Array.isArray(raw?.b) ? raw.b : (Array.isArray(raw?.list?.[0]?.b) ? raw.list[0].b : (Array.isArray(raw?.bids) ? raw.bids : []));
+            const asks = Array.isArray(raw?.a) ? raw.a : (Array.isArray(raw?.list?.[0]?.a) ? raw.list[0].a : (Array.isArray(raw?.asks) ? raw.asks : []));
+            const bestBid = Array.isArray(bids) && bids.length > 0 ? bids[0] : null;
+            const bestAsk = Array.isArray(asks) && asks.length > 0 ? asks[0] : null;
+
+            let data = {
+                symbol,
+                exchange: 'bybit',
+                bid1: bestBid && bestBid.length >= 2 ? { price: Number(bestBid[0]), amount: Number(bestBid[1]) } : null,
+                ask1: bestAsk && bestAsk.length >= 2 ? { price: Number(bestAsk[0]), amount: Number(bestAsk[1]) } : null,
+                ts: Date.now(),
+                source: 'orderbook'
+            };
+
+            const isInvalid = (!data.bid1?.price || data.bid1.price <= 0) && (!data.ask1?.price || data.ask1.price <= 0);
+            if (isInvalid) {
+                const cached = await apiCache.get(cacheKey);
+                if (cached) {
+                    return res.json({ success: true, data: cached, cached: true, fallback: true });
+                }
+                return res.json({ success: true, data, invalid: true });
+            }
+
+            await apiCache.set(cacheKey, data, 1);
+            return res.json({ success: true, data });
+        }
+
+        return res.status(400).json({ success: false, error: `不支援的交易所: ${exchange}` });
+    } catch (error) {
+        logger.error(`獲取公開 ticker 失敗 ${req.params.exchange}/${req.params.symbol}:`, error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -808,7 +931,7 @@ router.post('/prices/batch', requireEngine, async (req, res) => {
                 } else {
                     const ob = await req.engine.exchanges.bybit.getOrderBook(s);
                     bybitResults[s] = ob;
-                    await apiCache.set(key, ob, 2);
+                    await apiCache.set(key, ob, 1); // 1秒TTL
                 }
             }
             prices.bybit = bybitResults;
@@ -829,7 +952,7 @@ router.post('/prices/batch', requireEngine, async (req, res) => {
                     } else {
                         const orderBook = await req.engine.exchanges.binance.getOrderBook(symbol, 'spot');
                         binancePrices[symbol] = orderBook;
-                        await apiCache.set(key, orderBook, 2);
+                        await apiCache.set(key, orderBook, 1); // 1秒TTL
                     }
                 }
                 prices.binance = binancePrices;
@@ -1035,6 +1158,15 @@ router.post('/arbitrage/execute/:pairId', requireEngine, async (req, res) => {
     try {
         const { pairId } = req.params;
         
+        // 檢查是否正在執行中（防重複執行）
+        if (req.engine.activeTrades.has(pairId)) {
+            return res.status(429).json({
+                success: false,
+                error: '該交易對正在執行中，請稍後再試',
+                retryAfter: 5 // 5秒後可重試
+            });
+        }
+        
         const pairConfig = req.engine.monitoringPairs.get(pairId);
         if (!pairConfig) {
             return res.status(404).json({
@@ -1053,11 +1185,26 @@ router.post('/arbitrage/execute/:pairId', requireEngine, async (req, res) => {
         }
 
         // 執行套利
+        const startTime = Date.now();
         const result = await req.engine.executeArbitrage(opportunity);
+        const executionTime = Date.now() - startTime;
+        
+        // 記錄執行結果（只在成功或重要錯誤時記錄）
+        if (result.success || result.reason?.includes('風控')) {
+            logger.info(`套利執行完成 ${pairId}`, {
+                success: result.success,
+                executionTime: `${executionTime}ms`,
+                mock: result.mock || false,
+                reason: result.reason
+            });
+        }
         
         res.json({
             success: result.success,
-            data: result
+            data: {
+                ...result,
+                executionTime: executionTime
+            }
         });
 
     } catch (error) {
@@ -1123,6 +1270,28 @@ router.get('/twap/strategies', requireEngine, (req, res) => {
             success: false,
             error: error.message
         });
+    }
+});
+
+/**
+ * 刪除TWAP策略
+ * DELETE /api/twap/strategies/:id
+ */
+router.delete('/twap/strategies/:id', requireEngine, (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!id) {
+            return res.status(400).json({ success: false, error: '缺少策略ID' });
+        }
+        const existed = req.engine.twapStrategies.has(id);
+        if (!existed) {
+            return res.status(404).json({ success: false, error: '策略不存在' });
+        }
+        req.engine.twapStrategies.delete(id);
+        return res.json({ success: true });
+    } catch (error) {
+        logger.error('刪除TWAP策略失敗:', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -1216,8 +1385,6 @@ router.put('/settings/risk', requireEngine, (req, res) => {
  */
 router.get('/settings/api', (req, res) => {
     try {
-        const apiSettings = {};
-        
         // 只返回真正配置了的 API（不是默認值）
         const isValidApiKey = (key) => {
             return key && 
@@ -1228,47 +1395,97 @@ router.get('/settings/api', (req, res) => {
                    key !== 'your_bitget_api_key';
         };
         
+        const responseData = {};
+        
+        // 調試：檢查實際的環境變數值
+        console.log('DEBUG: BYBIT_API_KEY =', process.env.BYBIT_API_KEY);
+        console.log('DEBUG: BYBIT_SECRET =', process.env.BYBIT_SECRET);
+        console.log('DEBUG: isValidApiKey(BYBIT_API_KEY) =', isValidApiKey(process.env.BYBIT_API_KEY));
+        console.log('DEBUG: isValidApiKey(BYBIT_SECRET) =', isValidApiKey(process.env.BYBIT_SECRET));
+        
         // 檢查 Bybit
-        if (isValidApiKey(process.env.BYBIT_API_KEY) && process.env.BYBIT_SECRET) {
-            apiSettings.bybit = {
-                apiKey: process.env.BYBIT_API_KEY,
-                secret: process.env.BYBIT_SECRET,
+        if (isValidApiKey(process.env.BYBIT_API_KEY) && isValidApiKey(process.env.BYBIT_SECRET)) {
+            responseData.bybit = {
+                connected: true,
+                publicOnly: false,
+                hasApiKey: true,
+                hasSecret: true,
                 testnet: process.env.BYBIT_TESTNET === 'true'
+            };
+        } else {
+            responseData.bybit = {
+                connected: false,
+                publicOnly: true,
+                hasApiKey: false,
+                hasSecret: false,
+                testnet: false
             };
         }
         
         // 檢查 Binance
-        if (isValidApiKey(process.env.BINANCE_API_KEY) && process.env.BINANCE_SECRET) {
-            apiSettings.binance = {
-                apiKey: process.env.BINANCE_API_KEY,
-                secret: process.env.BINANCE_SECRET,
+        if (isValidApiKey(process.env.BINANCE_API_KEY) && isValidApiKey(process.env.BINANCE_SECRET)) {
+            responseData.binance = {
+                connected: true,
+                publicOnly: false,
+                hasApiKey: true,
+                hasSecret: true,
                 testnet: process.env.BINANCE_TESTNET === 'true'
+            };
+        } else {
+            responseData.binance = {
+                connected: false,
+                publicOnly: true,
+                hasApiKey: false,
+                hasSecret: false,
+                testnet: false
             };
         }
         
         // 檢查 OKX
         if (isValidApiKey(process.env.OKX_API_KEY) && process.env.OKX_SECRET) {
-            apiSettings.okx = {
-                apiKey: process.env.OKX_API_KEY,
-                secret: process.env.OKX_SECRET,
-                passphrase: process.env.OKX_PASSPHRASE || '',
+            responseData.okx = {
+                connected: true,
+                publicOnly: false,
+                hasApiKey: true,
+                hasSecret: true,
+                hasPassphrase: !!process.env.OKX_PASSPHRASE,
                 testnet: process.env.OKX_TESTNET === 'true'
+            };
+        } else {
+            responseData.okx = {
+                connected: false,
+                publicOnly: true,
+                hasApiKey: false,
+                hasSecret: false,
+                hasPassphrase: false,
+                testnet: false
             };
         }
         
         // 檢查 Bitget
         if (isValidApiKey(process.env.BITGET_API_KEY) && process.env.BITGET_SECRET) {
-            apiSettings.bitget = {
-                apiKey: process.env.BITGET_API_KEY,
-                secret: process.env.BITGET_SECRET,
-                passphrase: process.env.BITGET_PASSPHRASE || '',
+            responseData.bitget = {
+                connected: true,
+                publicOnly: false,
+                hasApiKey: true,
+                hasSecret: true,
+                hasPassphrase: !!process.env.BITGET_PASSPHRASE,
                 testnet: process.env.BITGET_TESTNET === 'true'
+            };
+        } else {
+            responseData.bitget = {
+                connected: false,
+                publicOnly: true,
+                hasApiKey: false,
+                hasSecret: false,
+                hasPassphrase: false,
+                testnet: false
             };
         }
 
         res.json({
             success: true,
-            data: apiSettings
+            data: responseData
         });
 
     } catch (error) {
@@ -1286,41 +1503,94 @@ router.get('/settings/api', (req, res) => {
  */
 router.put('/settings/api', (req, res) => {
     try {
-        const { bybitApiKey, bybitSecret, bybitTestnet } = req.body;
+        const requestData = req.body;
+        logger.info('API Settings Update Request', requestData, 'API');
         
         // 準備要寫入 .env 檔案的數據
         const envData = {};
         
-        // 更新環境變數（內存中）
-        if (bybitApiKey !== undefined) {
-            process.env.BYBIT_API_KEY = bybitApiKey;
-            envData.BYBIT_API_KEY = bybitApiKey;
+        // 處理新的多交易所格式
+        if (requestData.bybit) {
+            const { apiKey, secret, testnet } = requestData.bybit;
+            
+            if (apiKey !== undefined) {
+                process.env.BYBIT_API_KEY = apiKey;
+                envData.BYBIT_API_KEY = apiKey;
+            }
+            if (secret !== undefined) {
+                process.env.BYBIT_SECRET = secret;
+                envData.BYBIT_SECRET = secret;
+            }
+            if (testnet !== undefined) {
+                process.env.BYBIT_TESTNET = testnet.toString();
+                envData.BYBIT_TESTNET = testnet.toString();
+            }
         }
-        if (bybitSecret !== undefined) {
-            process.env.BYBIT_SECRET = bybitSecret;
-            envData.BYBIT_SECRET = bybitSecret;
+        
+        // 處理舊的單一格式（向後兼容）
+        if (requestData.bybitApiKey !== undefined) {
+            process.env.BYBIT_API_KEY = requestData.bybitApiKey;
+            envData.BYBIT_API_KEY = requestData.bybitApiKey;
         }
-        if (bybitTestnet !== undefined) {
-            process.env.BYBIT_TESTNET = bybitTestnet.toString();
-            envData.BYBIT_TESTNET = bybitTestnet.toString();
+        if (requestData.bybitSecret !== undefined) {
+            process.env.BYBIT_SECRET = requestData.bybitSecret;
+            envData.BYBIT_SECRET = requestData.bybitSecret;
+        }
+        if (requestData.bybitTestnet !== undefined) {
+            process.env.BYBIT_TESTNET = requestData.bybitTestnet.toString();
+            envData.BYBIT_TESTNET = requestData.bybitTestnet.toString();
         }
 
         // 寫入 .env 檔案
         if (Object.keys(envData).length > 0) {
             writeEnvFile(envData);
+            logger.info('API設定已更新並寫入 .env 檔案', envData, 'API');
         }
 
-        logger.info('API設定已更新並寫入 .env 檔案');
+        // 返回更新後的設定狀態
+        const responseData = {};
+        
+        // 檢查 Bybit 設定
+        if (process.env.BYBIT_API_KEY && process.env.BYBIT_SECRET) {
+            responseData.bybit = {
+                connected: true,
+                publicOnly: false,
+                hasApiKey: true,
+                hasSecret: true,
+                testnet: process.env.BYBIT_TESTNET === 'true'
+            };
+        } else {
+            responseData.bybit = {
+                connected: false,
+                publicOnly: true,
+                hasApiKey: false,
+                hasSecret: false,
+                testnet: false
+            };
+        }
+        
+        // 檢查 Binance 設定
+        if (process.env.BINANCE_API_KEY && process.env.BINANCE_SECRET) {
+            responseData.binance = {
+                connected: true,
+                publicOnly: false,
+                hasApiKey: true,
+                hasSecret: true,
+                testnet: process.env.BINANCE_TESTNET === 'true'
+            };
+        } else {
+            responseData.binance = {
+                connected: false,
+                publicOnly: true,
+                hasApiKey: false,
+                hasSecret: false,
+                testnet: false
+            };
+        }
         
         res.json({
             success: true,
-            data: {
-                bybit: {
-                    apiKey: process.env.BYBIT_API_KEY || '',
-                    secret: process.env.BYBIT_SECRET || '',
-                    testnet: process.env.BYBIT_TESTNET === 'true'
-                }
-            }
+            data: responseData
         });
 
     } catch (error) {
@@ -1351,7 +1621,7 @@ router.get('/settings/api/edit', (req, res) => {
         };
         
         // 檢查 Bybit
-        if (isValidApiKey(process.env.BYBIT_API_KEY) && process.env.BYBIT_SECRET) {
+        if (isValidApiKey(process.env.BYBIT_API_KEY) && isValidApiKey(process.env.BYBIT_SECRET)) {
             apiSettings.bybit = {
                 apiKey: process.env.BYBIT_API_KEY,
                 secret: process.env.BYBIT_SECRET,
@@ -1360,7 +1630,7 @@ router.get('/settings/api/edit', (req, res) => {
         }
         
         // 檢查 Binance
-        if (isValidApiKey(process.env.BINANCE_API_KEY) && process.env.BINANCE_SECRET) {
+        if (isValidApiKey(process.env.BINANCE_API_KEY) && isValidApiKey(process.env.BINANCE_SECRET)) {
             apiSettings.binance = {
                 apiKey: process.env.BINANCE_API_KEY,
                 secret: process.env.BINANCE_SECRET,
@@ -1369,7 +1639,7 @@ router.get('/settings/api/edit', (req, res) => {
         }
         
         // 檢查 OKX
-        if (isValidApiKey(process.env.OKX_API_KEY) && process.env.OKX_SECRET) {
+        if (isValidApiKey(process.env.OKX_API_KEY) && isValidApiKey(process.env.OKX_SECRET)) {
             apiSettings.okx = {
                 apiKey: process.env.OKX_API_KEY,
                 secret: process.env.OKX_SECRET,
@@ -1379,7 +1649,7 @@ router.get('/settings/api/edit', (req, res) => {
         }
         
         // 檢查 Bitget
-        if (isValidApiKey(process.env.BITGET_API_KEY) && process.env.BITGET_SECRET) {
+        if (isValidApiKey(process.env.BITGET_API_KEY) && isValidApiKey(process.env.BITGET_SECRET)) {
             apiSettings.bitget = {
                 apiKey: process.env.BITGET_API_KEY,
                 secret: process.env.BITGET_SECRET,
@@ -1409,6 +1679,7 @@ router.get('/settings/api/edit', (req, res) => {
 router.delete('/settings/api/:exchange', (req, res) => {
     try {
         const { exchange } = req.params;
+        logger.info(`API Settings Delete Request for ${exchange}`, null, 'API');
         
         if (exchange === 'bybit') {
             // 準備要寫入 .env 檔案的數據（清空）
@@ -1426,7 +1697,31 @@ router.delete('/settings/api/:exchange', (req, res) => {
             // 寫入 .env 檔案
             writeEnvFile(envData);
             
-            logger.info(`已刪除 ${exchange} API設定並更新 .env 檔案`);
+            logger.info(`已刪除 ${exchange} API設定並更新 .env 檔案`, envData, 'API');
+            
+            res.json({
+                success: true,
+                data: {
+                    message: `已刪除 ${exchange} API設定`
+                }
+            });
+        } else if (exchange === 'binance') {
+            // 準備要寫入 .env 檔案的數據（清空）
+            const envData = {
+                BINANCE_API_KEY: '',
+                BINANCE_SECRET: '',
+                BINANCE_TESTNET: 'false'
+            };
+            
+            // 清空 Binance API 設定（內存中）
+            process.env.BINANCE_API_KEY = '';
+            process.env.BINANCE_SECRET = '';
+            process.env.BINANCE_TESTNET = 'false';
+            
+            // 寫入 .env 檔案
+            writeEnvFile(envData);
+            
+            logger.info(`已刪除 ${exchange} API設定並更新 .env 檔案`, envData, 'API');
             
             res.json({
                 success: true,

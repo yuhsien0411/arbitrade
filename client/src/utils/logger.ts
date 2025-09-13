@@ -26,27 +26,26 @@ class FrontendLogger {
 
   private initWebSocket() {
     try {
-      const wsUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:5000';
-      // Logger 本身的 WebSocket 連接日誌仍然顯示在控制台
-      console.log('🔌 [Logger] 嘗試連接 WebSocket:', wsUrl);
+      const wsUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:7000/ws';
+      // 靜默連線，不在控制台輸出
       this.ws = new WebSocket(wsUrl);
       
       this.ws.onopen = () => {
         this.isConnected = true;
-        console.log('🔌 [Logger] WebSocket 連接已建立，日誌將同步到後端');
+        // 靜默
         this.flushQueue();
       };
       
       this.ws.onclose = () => {
         this.isConnected = false;
-        console.warn('🔌 [Logger] WebSocket 連接已斷開');
+        // 靜默
       };
       
       this.ws.onerror = (error) => {
-        console.error('🔌 [Logger] WebSocket 錯誤:', error);
+        // 靜默
       };
     } catch (error) {
-      console.warn('🔌 [Logger] WebSocket 初始化失敗:', error);
+      // 靜默
     }
   }
 
@@ -105,11 +104,7 @@ class FrontendLogger {
     }
     
     // 其他日誌發送到瀏覽器控制台
-    const consoleMethod = level === 'error' ? 'error' : 
-                         level === 'warn' ? 'warn' : 
-                         level === 'debug' ? 'debug' : 'log';
-    
-    console[consoleMethod](`${this.getEmoji(level)} [${source}] ${message}`, data || '');
+    // 關閉瀏覽器控制台輸出，僅保留後端收集
     
     // 檢查是否應該發送到後端
     const shouldSend = this.shouldSendToBackend(source, message, data);

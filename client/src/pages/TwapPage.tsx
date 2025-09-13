@@ -14,8 +14,8 @@ import {
 } from '@ant-design/icons';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
-import { apiService, TwapStrategyConfig, ApiResponse } from '../services/api';
-import { addStrategy, removeStrategy, pauseStrategy, resumeStrategy, cancelStrategy } from '../store/slices/twapSlice';
+import { apiService, ApiResponse } from '../services/api';
+import { addStrategy, updateStrategy, removeStrategy, setStrategies, pauseStrategy, resumeStrategy, cancelStrategy } from '../store/slices/twapSlice';
 import { formatAmountWithCurrency } from '../utils/formatters';
 import logger from '../utils/logger';
 
@@ -28,6 +28,24 @@ const TwapPage: React.FC = () => {
   const { message } = AntdApp.useApp();
   const { exchanges, isConnected } = useSelector((state: RootState) => state.system);
   const { strategies, executions } = useSelector((state: RootState) => state.twap);
+  
+  // 將已完成的策略轉換為執行記錄格式
+  const completedStrategiesAsExecutions = strategies
+    .filter(strategy => strategy.status === 'completed')
+    .map(strategy => ({
+      strategyId: strategy.id,
+      timestamp: strategy.createdAt,
+      amount: strategy.totalAmount,
+      leg1Price: null,
+      leg2Price: null,
+      success: true,
+      orderId: `completed_${strategy.id}`,
+      legIndex: 0
+    }));
+  
+  // 合併原始執行記錄和已完成的策略
+  const allExecutions = [...executions, ...completedStrategiesAsExecutions]
+    .sort((a, b) => b.timestamp - a.timestamp);
   
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -43,9 +61,39 @@ const TwapPage: React.FC = () => {
     try {
       const response = await apiService.getTwapStrategies() as unknown as ApiResponse;
       if (response.success && response.data) {
-        response.data.forEach((strategy: any) => {
-          dispatch(addStrategy(strategy));
-        });
+        // 轉換後端數據為前端格式
+        const strategies = response.data.map((plan: any) => ({
+          id: plan.planId,
+          leg1: {
+            exchange: plan.legs?.[0]?.exchange || 'bybit',
+            symbol: plan.legs?.[0]?.symbol || 'BTCUSDT',
+            type: 'spot' as const, // 第一個 leg 總是現貨
+            side: plan.legs?.[0]?.side || 'buy'
+          },
+          leg2: {
+            exchange: plan.legs?.[1]?.exchange || 'bybit',
+            symbol: plan.legs?.[1]?.symbol || 'BTCUSDT',
+            type: 'future' as const, // 第二個 leg 總是永續合約
+            side: plan.legs?.[1]?.side || 'sell'
+          },
+          totalAmount: plan.totalQty,
+          timeInterval: plan.intervalMs,
+          orderCount: plan.slicesTotal,
+          amountPerOrder: plan.sliceQty,
+          priceType: 'market' as const,
+          enabled: true,
+          createdAt: plan.createdAt || Date.now(),
+          executedOrders: plan.progress?.slicesDone || 0,
+          remainingAmount: Math.max(0, plan.progress?.remaining || plan.totalQty),
+          nextExecutionTime: plan.progress?.nextExecutionTs || 0,
+          status: plan.state === 'running' ? 'active' as const : 
+                 plan.state === 'paused' ? 'paused' as const :
+                 plan.state === 'completed' ? 'completed' as const :
+                 plan.state === 'cancelled' ? 'cancelled' as const : 'active' as const
+        }));
+        
+        // 一次性設置所有策略
+        dispatch(setStrategies(strategies));
       }
     } catch (error) {
       logger.error('載入TWAP策略失敗', error, 'TwapPage');
@@ -57,48 +105,100 @@ const TwapPage: React.FC = () => {
     loadTwapStrategies();
   }, [loadTwapStrategies]);
 
-  // 添加/更新TWAP策略
+  // 添加/更新TWAP策略（後端僅需單腿：symbol/side/totalAmount/timeInterval/orderCount）
   const handleSubmit = async (values: any) => {
     try {
       setLoading(true);
       
-      // 生成唯一 ID（如果沒有編輯中的策略）
-      const strategyId = editingStrategy?.id || `twap_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
-      const config: TwapStrategyConfig = {
-        id: strategyId,
-        leg1: {
-          exchange: values.leg1_exchange,
-          symbol: values.leg1_symbol,
-          type: values.leg1_type,
-          side: values.leg1_side,
-        },
-        leg2: {
-          exchange: values.leg2_exchange,
-          symbol: values.leg2_symbol,
-          type: values.leg2_type,
-          side: values.leg2_side,
-        },
-        totalAmount: values.totalAmount,
-        timeInterval: values.timeInterval * 1000, // 轉換為毫秒
-        orderCount: values.orderCount,
-        priceType: values.priceType || 'market',
-        enabled: values.enabled ?? true,
+      // 構建符合後端 API 格式的請求數據
+      const payload = {
+        name: `TWAP策略_${Date.now()}`,
+        totalQty: values.sliceQty * values.orderCount, // 總數量 = 單次數量 × 執行次數
+        sliceQty: values.sliceQty, // 單次數量
+        intervalMs: Math.max((values.timeInterval || 10), 10) * 1000,
+        legs: [
+          {
+            exchange: values.leg1_exchange || "bybit",
+            symbol: values.leg1_symbol,
+            side: values.leg1_side,
+            type: "market"  // 現貨交易
+          },
+          {
+            exchange: values.leg2_exchange || "bybit",
+            symbol: values.leg2_symbol,
+            side: values.leg2_side,
+            type: "market"  // 合約交易
+          }
+        ]
       };
 
       let response: ApiResponse;
       if (editingStrategy) {
-        // 更新時不傳遞 ID，只傳遞更新數據
-        const updateData = { ...config };
-        delete updateData.id; // 移除 ID，避免傳遞到更新請求中
-        response = await apiService.updateTwapStrategy(editingStrategy.id, updateData) as unknown as ApiResponse;
+        // 更新現有策略
+        response = await apiService.updateTwapStrategy(editingStrategy.id, payload) as unknown as ApiResponse;
       } else {
-        response = await apiService.addTwapStrategy(config) as unknown as ApiResponse;
+        // 創建新策略
+        response = await apiService.addTwapStrategy(payload) as unknown as ApiResponse;
       }
 
       if (response.success) {
-        dispatch(addStrategy(response.data));
-        message.success(editingStrategy ? '更新成功' : '添加成功');
+        // 構建完整的策略對象
+        const strategyData = {
+          id: editingStrategy ? editingStrategy.id : response.data.planId,
+          leg1: {
+            exchange: payload.legs[0].exchange,
+            symbol: payload.legs[0].symbol,
+            type: payload.legs[0].type as 'spot' | 'future',
+            side: payload.legs[0].side as 'buy' | 'sell'
+          },
+          leg2: {
+            exchange: payload.legs[1].exchange,
+            symbol: payload.legs[1].symbol,
+            type: 'future' as const,
+            side: payload.legs[1].side as 'buy' | 'sell'
+          },
+          totalAmount: payload.totalQty,
+          timeInterval: payload.intervalMs,
+          orderCount: Math.round(payload.totalQty / payload.sliceQty),
+          amountPerOrder: payload.sliceQty,
+          priceType: 'market' as const,
+          enabled: true,
+          createdAt: editingStrategy ? editingStrategy.createdAt : Date.now(),
+          executedOrders: editingStrategy ? editingStrategy.executedOrders : 0,
+          remainingAmount: Math.max(0, payload.totalQty),
+          nextExecutionTime: 0,
+          status: editingStrategy ? editingStrategy.status : 'active' as const
+        };
+        
+        if (editingStrategy) {
+          // 更新現有策略
+          dispatch(updateStrategy({ id: editingStrategy.id, updates: strategyData }));
+        } else {
+          // 添加新策略
+          dispatch(addStrategy(strategyData));
+          
+          // 如果啟用了自動執行，則自動啟動策略
+          if (values.enabled && response.data.planId) {
+            try {
+              const startResponse = await apiService.controlTwapStrategy(response.data.planId, 'start') as unknown as ApiResponse;
+              if (startResponse.success) {
+                dispatch(resumeStrategy(response.data.planId));
+                message.success('策略已創建並自動啟動');
+              } else {
+                message.success('策略創建成功，請手動啟動');
+              }
+            } catch (error) {
+              message.success('策略創建成功，請手動啟動');
+            }
+          } else {
+            message.success('策略創建成功，請手動啟動');
+          }
+        }
+        
+        if (editingStrategy) {
+          message.success('更新成功');
+        }
+        
         setIsModalVisible(false);
         form.resetFields();
         setEditingStrategy(null);
@@ -128,18 +228,45 @@ const TwapPage: React.FC = () => {
     });
   };
 
+  // 啟動策略
+  const handleStart = async (strategy: any) => {
+    try {
+      const response = await apiService.controlTwapStrategy(strategy.id, 'start') as unknown as ApiResponse;
+      
+      if (response.success) {
+        dispatch(resumeStrategy(strategy.id)); // 使用 resume 來更新狀態為 running
+        message.success('策略已啟動');
+      } else {
+        message.error(response.message || '啟動失敗');
+      }
+    } catch (error: any) {
+      message.error(error.message || '啟動失敗');
+    }
+  };
+
   // 暫停/恢復策略
   const handleTogglePause = async (strategy: any) => {
     try {
-      if (strategy.status === 'active') {
-        dispatch(pauseStrategy(strategy.id));
-        message.success('策略已暫停');
-      } else if (strategy.status === 'paused') {
-        dispatch(resumeStrategy(strategy.id));
-        message.success('策略已恢復');
+      const action = strategy.status === 'running' ? 'pause' : 'resume';
+      const response = await apiService.controlTwapStrategy(strategy.id, action) as unknown as ApiResponse;
+      
+      if (response.success) {
+        if (strategy.status === 'running') {
+          dispatch(pauseStrategy(strategy.id));
+          message.success('策略已暫停');
+        } else if (strategy.status === 'paused') {
+          dispatch(resumeStrategy(strategy.id));
+          message.success('策略已恢復');
+        }
+      } else {
+        const errorMsg = response.message || '操作失敗';
+        message.error(errorMsg);
+        console.error('TWAP control error:', response);
       }
     } catch (error: any) {
-      message.error(error.message || '操作失敗');
+      const errorMsg = error.response?.data?.detail?.message || error.message || '操作失敗';
+      message.error(errorMsg);
+      console.error('TWAP control exception:', error);
     }
   };
 
@@ -149,9 +276,18 @@ const TwapPage: React.FC = () => {
       title: '確認取消',
       content: '確定要取消這個TWAP策略嗎？取消後無法恢復。',
       icon: <ExclamationCircleOutlined />,
-      onOk: () => {
-        dispatch(cancelStrategy(id));
-        message.success('策略已取消');
+      onOk: async () => {
+        try {
+          const response = await apiService.controlTwapStrategy(id, 'cancel') as unknown as ApiResponse;
+          if (response.success) {
+            dispatch(cancelStrategy(id));
+            message.success('策略已取消');
+          } else {
+            message.error(response.message || '取消失敗');
+          }
+        } catch (error: any) {
+          message.error(error.message || '取消失敗');
+        }
       },
     });
   };
@@ -159,27 +295,41 @@ const TwapPage: React.FC = () => {
   // 編輯策略
   const handleEdit = (strategy: any) => {
     setEditingStrategy(strategy);
+    const leg1Exchange = strategy?.leg1?.exchange || 'bybit';
+    const leg1Symbol = strategy?.leg1?.symbol || strategy?.symbol || 'BTCUSDT';
+    const leg1Type = strategy?.leg1?.type || 'future';
+    const leg1Side = strategy?.leg1?.side || strategy?.side || 'buy';
+    const leg2Exchange = strategy?.leg2?.exchange || 'bybit';
+    const leg2Symbol = strategy?.leg2?.symbol || leg1Symbol;
+    const leg2Type = strategy?.leg2?.type || 'future';
+    const leg2Side = strategy?.leg2?.side || 'sell';
+    const timeIntervalSec = Math.max(1, Math.round(((strategy?.timeInterval ?? 1000) as number) / 1000));
+
     form.setFieldsValue({
-      leg1_exchange: strategy.leg1.exchange,
-      leg1_symbol: strategy.leg1.symbol,
-      leg1_type: strategy.leg1.type,
-      leg1_side: strategy.leg1.side,
-      leg2_exchange: strategy.leg2.exchange,
-      leg2_symbol: strategy.leg2.symbol,
-      leg2_type: strategy.leg2.type,
-      leg2_side: strategy.leg2.side,
-      totalAmount: strategy.totalAmount,
-      timeInterval: strategy.timeInterval / 1000, // 轉換為秒
+      leg1_exchange: leg1Exchange,
+      leg1_symbol: leg1Symbol,
+      leg1_type: leg1Type,
+      leg1_side: leg1Side,
+      leg2_exchange: leg2Exchange,
+      leg2_symbol: leg2Symbol,
+      leg2_type: leg2Type,
+      leg2_side: leg2Side,
+      sliceQty: strategy.sliceQty || (strategy.totalAmount / strategy.orderCount), // 單次數量
+      timeInterval: timeIntervalSec,
       orderCount: strategy.orderCount,
-      priceType: strategy.priceType,
-      enabled: strategy.enabled,
+      enabled: strategy.enabled ?? true,
     });
     setIsModalVisible(true);
   };
 
   // 計算進度百分比
   const getProgress = (strategy: any) => {
-    return strategy.orderCount > 0 ? (strategy.executedOrders / strategy.orderCount) * 100 : 0;
+    if (strategy.status === 'completed') {
+      return 100;
+    }
+    // 計算已完成的執行次數（每次執行包含兩個腿）
+    const completedExecutions = Math.floor((strategy.executedOrders || 0) / 2);
+    return strategy.orderCount > 0 ? (completedExecutions / strategy.orderCount) * 100 : 0;
   };
 
   // 格式化時間間隔
@@ -203,7 +353,7 @@ const TwapPage: React.FC = () => {
           <Space direction="vertical" size="small">
             <Text strong>{record.leg1.symbol || 'N/A'}</Text>
             <Text type="secondary" style={{ fontSize: '12px' }}>
-              {exchanges[record.leg1.exchange]?.name} {record.leg1.type}
+              {exchanges[record.leg1.exchange]?.name} {record.leg1.type === 'future' ? 'PERP' : 'SPOT'}
             </Text>
             <Tag color={record.leg1.side === 'buy' ? 'green' : 'red'}>
               {record.leg1.side === 'buy' ? '買入' : '賣出'}
@@ -223,10 +373,10 @@ const TwapPage: React.FC = () => {
           <Space direction="vertical" size="small">
             <Text strong>{record.leg2.symbol || 'N/A'}</Text>
             <Text type="secondary" style={{ fontSize: '12px' }}>
-              {exchanges[record.leg2.exchange]?.name} {record.leg2.type}
+              {exchanges[record.leg2.exchange]?.name} {record.leg2.type === 'future' ? 'PERP' : 'SPOT'}
             </Text>
             <Tag color={record.leg2.side === 'buy' ? 'green' : 'red'}>
-              {record.leg2.side === 'buy' ? '賣出' : '買入'}
+              {record.leg2.side === 'buy' ? '買入' : '賣出'}
             </Tag>
           </Space>
         );
@@ -254,7 +404,7 @@ const TwapPage: React.FC = () => {
               status={record.status === 'completed' ? 'success' : 'active'}
             />
             <Text style={{ fontSize: '12px' }}>
-              {record.executedOrders}/{record.orderCount} 筆
+              {Math.floor((record.executedOrders || 0) / 2)}/{record.orderCount} 次
             </Text>
           </Space>
         );
@@ -271,7 +421,9 @@ const TwapPage: React.FC = () => {
       render: (record: any) => {
         // 使用 leg1 的交易對符號來確定幣種
         const symbol = record.leg1?.symbol || record.leg2?.symbol || 'BTCUSDT';
-        return formatAmountWithCurrency(record.remainingAmount, symbol);
+        // 確保剩餘數量不會顯示負數
+        const remainingAmount = Math.max(0, record.remainingAmount || 0);
+        return formatAmountWithCurrency(remainingAmount, symbol);
       },
     },
     {
@@ -305,7 +457,18 @@ const TwapPage: React.FC = () => {
       key: 'actions',
       render: (record: any) => (
         <Space>
-          {record.status === 'active' && (
+          {record.status === 'pending' && (
+            <Tooltip title="啟動">
+              <Button
+                size="small"
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                onClick={() => handleStart(record)}
+              />
+            </Tooltip>
+          )}
+          
+          {(record.status === 'running' || record.status === 'active') && (
             <Tooltip title="暫停">
               <Button
                 size="small"
@@ -326,7 +489,7 @@ const TwapPage: React.FC = () => {
             </Tooltip>
           )}
           
-          {(record.status === 'active' || record.status === 'paused') && (
+          {(record.status === 'running' || record.status === 'paused' || record.status === 'active') && (
             <Tooltip title="取消">
               <Button
                 size="small"
@@ -375,9 +538,14 @@ const TwapPage: React.FC = () => {
     {
       title: '執行類型',
       key: 'type',
-      render: () => (
-        <Tag color="blue">雙腿執行</Tag>
-      ),
+      render: (record: any) => {
+        const isCompleted = record.orderId?.startsWith('completed_');
+        return (
+          <Tag color={isCompleted ? 'green' : 'blue'}>
+            {isCompleted ? '策略完成' : '雙腿執行'}
+          </Tag>
+        );
+      },
     },
     {
       title: '數量',
@@ -386,22 +554,39 @@ const TwapPage: React.FC = () => {
         // 從策略中獲取交易對符號
         const strategy = strategies.find(s => s.id === record.strategyId);
         const symbol = strategy?.leg1?.symbol || 'BTCUSDT';
-        return formatAmountWithCurrency(record.amount, symbol);
+        const isCompleted = record.orderId?.startsWith('completed_');
+        const amount = isCompleted ? strategy?.totalAmount || record.amount : record.amount;
+        return formatAmountWithCurrency(amount, symbol);
       },
     },
     {
       title: '執行價格',
       key: 'prices',
-      render: (record: any) => (
-        <Space direction="vertical" size="small">
-          <Text style={{ fontSize: '12px' }}>
-            Leg1: {record.leg1Price ? record.leg1Price.toFixed(6) : '市價'}
-          </Text>
-          <Text style={{ fontSize: '12px' }}>
-            Leg2: {record.leg2Price ? record.leg2Price.toFixed(6) : '市價'}
-          </Text>
-        </Space>
-      ),
+      render: (record: any) => {
+        const isCompleted = record.orderId?.startsWith('completed_');
+        if (isCompleted) {
+          return (
+            <Space direction="vertical" size="small">
+              <Text style={{ fontSize: '12px', color: '#52c41a' }}>
+                Leg1: 現貨市價
+              </Text>
+              <Text style={{ fontSize: '12px', color: '#52c41a' }}>
+                Leg2: 合約市價
+              </Text>
+            </Space>
+          );
+        }
+        return (
+          <Space direction="vertical" size="small">
+            <Text style={{ fontSize: '12px' }}>
+              Leg1: {record.leg1Price ? record.leg1Price.toFixed(6) : '市價'}
+            </Text>
+            <Text style={{ fontSize: '12px' }}>
+              Leg2: {record.leg2Price ? record.leg2Price.toFixed(6) : '市價'}
+            </Text>
+          </Space>
+        );
+      },
     },
     {
       title: '狀態',
@@ -456,22 +641,7 @@ const TwapPage: React.FC = () => {
         />
       )}
 
-      {/* 使用說明 */}
-      <Card style={{ marginBottom: 24 }} className="card-shadow">
-        <Alert
-          message="TWAP策略說明"
-          description={
-            <div>
-              <p>• <strong>雙腿TWAP策略</strong>：同時在兩個交易對執行時間加權平均價格策略，實現套利或對沖</p>
-              <p>• <strong>雙腿配置</strong>：可以自由選擇兩個不同的交易所、交易對和方向組合</p>
-              <p>• <strong>智能執行</strong>：系統會同步執行兩個腿的分割訂單，保持策略一致性</p>
-              <p>• <strong>進度監控</strong>：即時查看雙腿執行進度，支持暫停、恢復和取消操作</p>
-            </div>
-          }
-          type="info"
-          showIcon
-        />
-      </Card>
+  
 
       {/* TWAP策略列表 */}
       <Row gutter={[16, 16]}>
@@ -479,7 +649,7 @@ const TwapPage: React.FC = () => {
           <Card title="📋 TWAP策略列表" className="card-shadow">
             <Table
               columns={strategyColumns}
-              dataSource={strategies}
+              dataSource={strategies.filter(strategy => strategy.status !== 'completed')}
               rowKey="id"
               loading={loading}
               scroll={{ x: 1000 }}
@@ -495,7 +665,7 @@ const TwapPage: React.FC = () => {
           <Card title="📊 執行記錄" className="card-shadow">
             <Table
               columns={executionColumns}
-              dataSource={executions.slice(0, 50)}
+              dataSource={allExecutions.slice(0, 50)}
               rowKey={(record) => `${record.strategyId}_${record.timestamp}`}
               size="small"
               pagination={{ pageSize: 10 }}
@@ -525,13 +695,15 @@ const TwapPage: React.FC = () => {
             leg1_exchange: 'bybit',
             leg1_type: 'future',
             leg1_side: 'buy',
+            leg1_symbol: 'BTCUSDT',
             leg2_exchange: 'bybit',
             leg2_type: 'future',
             leg2_side: 'sell',
-            priceType: 'market',
+            leg2_symbol: 'BTCUSDT',
             enabled: true,
-            timeInterval: 60,
-            orderCount: 10,
+            timeInterval: 10,
+            orderCount: 2,
+            sliceQty: 0.01,
           }}
         >
           <Row gutter={16}>
@@ -565,10 +737,18 @@ const TwapPage: React.FC = () => {
                 <Form.Item
                   name="leg1_symbol"
                   label="交易對"
-                  rules={[{ required: true, message: '請選擇交易對' }]}
+                  rules={[
+                    { required: true, message: '請輸入交易對' },
+                    { 
+                      pattern: /^[A-Z0-9]+USDT?$/i, 
+                      message: '請輸入正確的交易對格式，如：BTCUSDT' 
+                    }
+                  ]}
+                  extra="請輸入交易對符號，如：BTCUSDT, ETHUSDT 等"
                 >
                   <Select 
                     placeholder="選擇交易對"
+                    defaultValue="BTCUSDT"
                     showSearch
                     filterOption={(input, option) => {
                       if (!option?.children) return false;
@@ -626,10 +806,18 @@ const TwapPage: React.FC = () => {
                 <Form.Item
                   name="leg2_symbol"
                   label="交易對"
-                  rules={[{ required: true, message: '請選擇交易對' }]}
+                  rules={[
+                    { required: true, message: '請輸入交易對' },
+                    { 
+                      pattern: /^[A-Z0-9]+USDT?$/i, 
+                      message: '請輸入正確的交易對格式，如：BTCUSDT' 
+                    }
+                  ]}
+                  extra="請輸入交易對符號，如：BTCUSDT, ETHUSDT 等"
                 >
                   <Select 
                     placeholder="選擇交易對"
+                    defaultValue="BTCUSDT"
                     showSearch
                     filterOption={(input, option) => {
                       if (!option?.children) return false;
@@ -660,34 +848,23 @@ const TwapPage: React.FC = () => {
 
           <Divider />
 
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                name="priceType"
-                label="訂單類型"
-                rules={[{ required: true, message: '請選擇訂單類型' }]}
-              >
-                <Select placeholder="選擇類型">
-                  <Option value="market">市價單</Option>
-                  <Option value="limit">限價單</Option>
-                </Select>
-              </Form.Item>
-            </Col>
-          </Row>
+          {/* 僅允許市價單，UI 不提供切換 */}
+
+          {/* 固定使用市價單，不顯示選擇 */}
 
           <Row gutter={16}>
             <Col span={12}>
               <Form.Item
-                name="totalAmount"
-                label="總交易數量"
-                rules={[{ required: true, message: '請輸入總交易數量' }]}
-                extra="每次觸發時的下單數量"
+                name="sliceQty"
+                label="單次數量"
+                rules={[{ required: true, message: '請輸入單次數量' }]}
+                extra="每次執行的下單數量"
               >
                 <InputNumber
                   min={0.01}
                   step={0.01}
                   style={{ width: '100%' }}
-                  placeholder="1"
+                  placeholder="0.01"
                   addonAfter="幣"
                 />
               </Form.Item>
@@ -696,15 +873,16 @@ const TwapPage: React.FC = () => {
             <Col span={12}>
               <Form.Item
                 name="orderCount"
-                label="分割訂單數"
-                rules={[{ required: true, message: '請輸入分割訂單數' }]}
+                label="執行次數"
+                rules={[{ required: true, message: '請輸入執行次數' }]}
+                extra="總共執行多少次"
               >
                 <InputNumber
                   min={1}
                   max={100}
                   step={1}
                   style={{ width: '100%' }}
-                  placeholder="10"
+                  placeholder="2"
                 />
               </Form.Item>
             </Col>
@@ -722,7 +900,7 @@ const TwapPage: React.FC = () => {
                   max={3600}
                   step={1}
                   style={{ width: '100%' }}
-                  placeholder="60"
+                  placeholder="10"
                 />
               </Form.Item>
             </Col>
@@ -732,6 +910,7 @@ const TwapPage: React.FC = () => {
                 name="enabled"
                 label="立即啟用"
                 valuePropName="checked"
+                initialValue={true}
               >
                 <Switch checkedChildren="是" unCheckedChildren="否" />
               </Form.Item>

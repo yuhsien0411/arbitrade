@@ -1,6 +1,5 @@
 /**
  * 監控儀表板頁面
- * 參考Taoli Tools設計，提供即時監控功能
  */
 
 import React, { useEffect, useState } from 'react';

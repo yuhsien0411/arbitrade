@@ -8,7 +8,7 @@ import logger from '../utils/logger';
 
 // 創建axios實例
 const api = axios.create({
-  baseURL: process.env.REACT_APP_API_URL || 'http://localhost:5000',
+  baseURL: process.env.REACT_APP_API_URL || 'http://localhost:7000',
   timeout: 10000,
   headers: {
     'Content-Type': 'application/json',
@@ -151,16 +151,19 @@ export const apiService = {
     api.post(`/api/arbitrage/execute/${pairId}`),
   
   // TWAP策略管理
-  getTwapStrategies: () => api.get('/api/twap/strategies'),
+  getTwapStrategies: () => api.get('/api/twap/plans'),
   
   addTwapStrategy: (config: any) => 
-    api.post('/api/twap/strategies', config),
+    api.post('/api/twap/plans', config),
   
   updateTwapStrategy: (id: string, updates: any) => 
-    api.put(`/api/twap/strategies/${id}`, updates),
+    api.put(`/api/twap/plans/${id}`, updates),
   
   removeTwapStrategy: (id: string) => 
-    api.delete(`/api/twap/strategies/${id}`),
+    api.delete(`/api/twap/plans/${id}`),
+  
+  controlTwapStrategy: (id: string, action: string) =>
+    api.post(`/api/twap/${id}/control`, { action }),
   
   // 賬戶信息
   getAccount: (exchange: string) => 
@@ -177,22 +180,14 @@ export const apiService = {
   getApiSettingsForEdit: () =>
     api.get('/api/settings/api/edit'),
 
-  updateApiSettings: (settings: ApiSettings) =>
+  updateApiSettings: (settings: any) =>
     api.put('/api/settings/api', settings),
 
   deleteApiSettings: (exchange: string) =>
     api.delete(`/api/settings/api/${exchange}`),
 
-  testApiConnection: async () => {
-    try {
-      const response = await api.get('/api/settings/api/test');
-      console.log('API 測試響應:', response);
-      return response;
-    } catch (error) {
-      console.error('API 測試錯誤:', error);
-      throw error;
-    }
-  },
+  testApiConnection: (exchange?: string) =>
+    api.post('/api/settings/api/test', exchange ? { exchange } : {}),
   
   // 統計數據
   getStats: () => api.get('/stats'),

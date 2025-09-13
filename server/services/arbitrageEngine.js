@@ -14,6 +14,7 @@ const BinanceExchange = require('../exchanges/binance/BinanceExchange');
 const { getPerformanceMonitor } = require('./PerformanceMonitor');
 const MonitoringDashboard = require('./MonitoringDashboard');
 const ArbitragePerformanceMonitor = require('./ArbitragePerformanceMonitor');
+const ArbitragePair = require('../models/ArbitragePair');
 const logger = require('../utils/logger');
 const EventEmitter = require('events');
 
@@ -32,6 +33,10 @@ class ArbitrageEngine extends EventEmitter {
         this.activeStrategies = new Map(); // 活躍的套利策略
         this.twapStrategies = new Map(); // TWAP策略
         
+        // 持久化配置
+        this.useDatabase = process.env.USE_DATABASE_PERSISTENCE === 'true';
+        this.persistenceEnabled = this.useDatabase;
+        
         // 系統狀態
         this.isRunning = false;
         this.monitoringInterval = null;
@@ -41,8 +46,16 @@ class ArbitrageEngine extends EventEmitter {
         this.riskLimits = {
             maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE) || 10000,
             maxDailyLoss: parseFloat(process.env.MAX_DAILY_LOSS) || 1000,
-            priceDeviationThreshold: parseFloat(process.env.PRICE_DEVIATION_THRESHOLD) || 0.05
+            priceDeviationThreshold: parseFloat(process.env.PRICE_DEVIATION_THRESHOLD) || 0.05,
+            maxConcurrentTrades: parseInt(process.env.MAX_CONCURRENT_TRADES) || 5,
+            minSpreadPercent: parseFloat(process.env.MIN_SPREAD_PERCENT) || 0.1,
+            maxSlippage: parseFloat(process.env.MAX_SLIPPAGE) || 0.5,
+            maxOrderSize: parseFloat(process.env.MAX_ORDER_SIZE) || 1000
         };
+
+        // Mock 模式配置
+        this.mockMode = process.env.ARBITRAGE_MOCK_MODE === 'true';
+        this.activeTrades = new Set(); // 追蹤活躍交易
 
         // 績效統計
         this.stats = {
@@ -150,6 +163,9 @@ class ArbitrageEngine extends EventEmitter {
             }
             
             
+            // 載入監控對配置
+            await this.loadMonitoringPairs();
+            
             // 開始價格監控
             this.startPriceMonitoring();
             
@@ -158,6 +174,13 @@ class ArbitrageEngine extends EventEmitter {
             this.monitoringDashboard.start(); // 監控儀表板
             this.arbitragePerformanceMonitor.startMonitoring(); // 專門的套利性能監控
             
+            // 啟動 TWAP 調度器（每秒檢查一次）
+            if (this.twapInterval) clearInterval(this.twapInterval);
+            this.twapInterval = setInterval(() => {
+                if (!this.isRunning) return;
+                this.executeTwapStrategies().catch(err => logger.error('TWAP 調度錯誤:', err));
+            }, 1000);
+
             this.isRunning = true;
             logger.info('✅ 套利引擎啟動成功');
 
@@ -208,6 +231,46 @@ class ArbitrageEngine extends EventEmitter {
 
 
     /**
+     * 載入監控交易對配置
+     */
+    async loadMonitoringPairs() {
+        try {
+            if (this.persistenceEnabled) {
+                logger.info('從資料庫載入監控交易對配置...');
+                const pairs = await ArbitragePair.find({ enabled: true });
+                
+                for (const pair of pairs) {
+                    const pairConfig = {
+                        id: pair.id,
+                        leg1: pair.leg1,
+                        leg2: pair.leg2,
+                        threshold: pair.threshold,
+                        amount: pair.amount,
+                        enabled: pair.enabled,
+                        executionMode: pair.executionMode || 'threshold',
+                        qty: pair.qty || 0.01,
+                        totalAmount: pair.totalAmount || 1000,
+                        consumedAmount: pair.consumedAmount || 0,
+                        createdAt: pair.createdAt.getTime(),
+                        lastTriggered: pair.lastTriggered?.getTime() || null,
+                        totalTriggers: pair.totalTriggers || 0
+                    };
+                    
+                    this.monitoringPairs.set(pair.id, pairConfig);
+                }
+                
+                logger.info(`✅ 從資料庫載入了 ${pairs.length} 個監控交易對`);
+            } else {
+                logger.info('使用記憶體模式，跳過資料庫載入');
+            }
+        } catch (error) {
+            logger.error('載入監控交易對失敗:', error);
+            // 如果資料庫載入失敗，繼續使用記憶體模式
+            this.persistenceEnabled = false;
+        }
+    }
+
+    /**
      * 添加監控交易對
      * 用戶可以選擇要監控的雙腿交易對
      */
@@ -218,7 +281,11 @@ class ArbitrageEngine extends EventEmitter {
             leg2, 
             threshold, // 觸發套利的價差閾值
             amount, // 交易數量
-            enabled = true
+            enabled = true,
+            executionMode = 'threshold',
+            qty = 0.01,
+            totalAmount = 1000,
+            consumedAmount = 0
         } = config;
 
         const pairConfig = {
@@ -228,10 +295,56 @@ class ArbitrageEngine extends EventEmitter {
             threshold: parseFloat(threshold),
             amount: parseFloat(amount),
             enabled,
+            executionMode,
+            qty: parseFloat(qty),
+            totalAmount: parseFloat(totalAmount),
+            consumedAmount: parseFloat(consumedAmount),
             createdAt: Date.now(),
             lastTriggered: null,
             totalTriggers: 0
         };
+
+        // 保存到資料庫（如果啟用持久化）
+        if (this.persistenceEnabled) {
+            try {
+                const existingPair = await ArbitragePair.findOne({ id });
+                if (existingPair) {
+                    // 更新現有記錄
+                    await ArbitragePair.updateOne({ id }, {
+                        leg1: pairConfig.leg1,
+                        leg2: pairConfig.leg2,
+                        threshold: pairConfig.threshold,
+                        amount: pairConfig.amount,
+                        enabled: pairConfig.enabled,
+                        executionMode: pairConfig.executionMode,
+                        qty: pairConfig.qty,
+                        totalAmount: pairConfig.totalAmount,
+                        consumedAmount: pairConfig.consumedAmount,
+                        updatedAt: new Date()
+                    });
+                    logger.info('更新資料庫中的監控交易對:', id);
+                } else {
+                    // 創建新記錄
+                    await ArbitragePair.create({
+                        id: pairConfig.id,
+                        leg1: pairConfig.leg1,
+                        leg2: pairConfig.leg2,
+                        threshold: pairConfig.threshold,
+                        amount: pairConfig.amount,
+                        enabled: pairConfig.enabled,
+                        executionMode: pairConfig.executionMode,
+                        qty: pairConfig.qty,
+                        totalAmount: pairConfig.totalAmount,
+                        consumedAmount: pairConfig.consumedAmount,
+                        createdAt: new Date(pairConfig.createdAt)
+                    });
+                    logger.info('保存監控交易對到資料庫:', id);
+                }
+            } catch (error) {
+                logger.error('保存監控交易對到資料庫失敗:', error);
+                // 繼續使用記憶體模式
+            }
+        }
 
         this.monitoringPairs.set(id, pairConfig);
         
@@ -267,7 +380,17 @@ class ArbitrageEngine extends EventEmitter {
     /**
      * 移除監控交易對
      */
-    removeMonitoringPair(id) {
+    async removeMonitoringPair(id) {
+        // 從資料庫刪除（如果啟用持久化）
+        if (this.persistenceEnabled) {
+            try {
+                await ArbitragePair.deleteOne({ id });
+                logger.info('從資料庫刪除監控交易對:', id);
+            } catch (error) {
+                logger.error('從資料庫刪除監控交易對失敗:', error);
+            }
+        }
+
         const removed = this.monitoringPairs.delete(id);
         if (removed) {
             logger.info(`移除監控交易對: ${id}`);
@@ -279,7 +402,7 @@ class ArbitrageEngine extends EventEmitter {
     /**
      * 更新監控交易對配置
      */
-    updateMonitoringPair(id, updates) {
+    async updateMonitoringPair(id, updates) {
         const pair = this.monitoringPairs.get(id);
         if (!pair) {
             throw new Error(`未找到交易對配置: ${id}`);
@@ -288,10 +411,220 @@ class ArbitrageEngine extends EventEmitter {
         const updated = { ...pair, ...updates, updatedAt: Date.now() };
         this.monitoringPairs.set(id, updated);
         
+        // 更新資料庫（如果啟用持久化）
+        if (this.persistenceEnabled) {
+            try {
+                await ArbitragePair.updateOne({ id }, {
+                    ...updates,
+                    updatedAt: new Date()
+                });
+                logger.info('更新資料庫中的監控交易對:', id);
+            } catch (error) {
+                logger.error('更新資料庫中的監控交易對失敗:', error);
+            }
+        }
+        
         logger.info(`更新監控交易對 ${id}`, updates);
         this.emit('pairUpdated', updated);
 
         return updated;
+    }
+
+    /**
+     * 獲取所有監控交易對
+     */
+    getAllMonitoringPairs() {
+        return Array.from(this.monitoringPairs.values());
+    }
+
+    /**
+     * 執行風控檢查
+     */
+    performRiskCheck(amount, opportunity = null) {
+        const checks = [];
+
+        // 1. 檢查最大訂單大小
+        if (amount > this.riskLimits.maxOrderSize) {
+            checks.push({
+                check: 'maxOrderSize',
+                passed: false,
+                reason: `訂單大小 ${amount} 超過最大限制 ${this.riskLimits.maxOrderSize}`
+            });
+        } else {
+            checks.push({
+                check: 'maxOrderSize',
+                passed: true
+            });
+        }
+
+        // 2. 檢查並發交易數量
+        if (this.activeTrades.size >= this.riskLimits.maxConcurrentTrades) {
+            checks.push({
+                check: 'maxConcurrentTrades',
+                passed: false,
+                reason: `當前活躍交易數量 ${this.activeTrades.size} 超過最大限制 ${this.riskLimits.maxConcurrentTrades}`
+            });
+        } else {
+            checks.push({
+                check: 'maxConcurrentTrades',
+                passed: true
+            });
+        }
+
+        // 3. 檢查價差閾值
+        if (opportunity && opportunity.spreadPercent < this.riskLimits.minSpreadPercent) {
+            checks.push({
+                check: 'minSpreadPercent',
+                passed: false,
+                reason: `價差 ${opportunity.spreadPercent.toFixed(3)}% 低於最小閾值 ${this.riskLimits.minSpreadPercent}%`
+            });
+        } else {
+            checks.push({
+                check: 'minSpreadPercent',
+                passed: true
+            });
+        }
+
+        // 4. 檢查日內虧損
+        if (this.stats.todayProfit < -this.riskLimits.maxDailyLoss) {
+            checks.push({
+                check: 'maxDailyLoss',
+                passed: false,
+                reason: `日內虧損 ${Math.abs(this.stats.todayProfit)} 超過最大限制 ${this.riskLimits.maxDailyLoss}`
+            });
+        } else {
+            checks.push({
+                check: 'maxDailyLoss',
+                passed: true
+            });
+        }
+
+        const failedChecks = checks.filter(check => !check.passed);
+        const passed = failedChecks.length === 0;
+
+        return {
+            passed,
+            checks,
+            failedChecks,
+            reason: passed ? null : failedChecks.map(c => c.reason).join('; ')
+        };
+    }
+
+    /**
+     * 執行 Mock 套利交易
+     */
+    async executeMockArbitrage(opportunity) {
+        const { id, pairConfig, direction, leg1Price, leg2Price } = opportunity;
+        const startTime = Date.now();
+
+        try {
+            logger.info('🎭 執行 Mock 套利交易', {
+                pairId: id,
+                direction,
+                spread: opportunity.spread,
+                spreadPercent: opportunity.spreadPercent,
+                mockMode: true
+            });
+
+            // 模擬執行延遲
+            await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
+
+            // 生成模擬訂單結果
+            const mockOrderId = () => `mock_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            
+            const orderQuantity = pairConfig.qty || pairConfig.amount;
+            const leg1Result = {
+                success: true,
+                orderId: mockOrderId(),
+                symbol: pairConfig.leg1.symbol,
+                side: direction === 'leg1_sell_leg2_buy' ? 'sell' : 'buy',
+                amount: orderQuantity,
+                quantity: orderQuantity,
+                price: direction === 'leg1_sell_leg2_buy' 
+                    ? (leg1Price?.ask1?.price || 50000)
+                    : (leg1Price?.bid1?.price || 50000),
+                exchange: pairConfig.leg1.exchange,
+                timestamp: Date.now(),
+                mock: true
+            };
+
+            const leg2Result = {
+                success: true,
+                orderId: mockOrderId(),
+                symbol: pairConfig.leg2.symbol,
+                side: direction === 'leg1_sell_leg2_buy' ? 'buy' : 'sell',
+                amount: orderQuantity,
+                quantity: orderQuantity,
+                price: direction === 'leg1_sell_leg2_buy'
+                    ? (leg2Price?.bid1?.price || 49950)
+                    : (leg2Price?.ask1?.price || 50050),
+                exchange: pairConfig.leg2.exchange,
+                timestamp: Date.now(),
+                mock: true
+            };
+
+            const executionTime = Date.now() - startTime;
+            const profit = opportunity.spread * (pairConfig.qty || pairConfig.amount);
+
+            // 更新統計
+            this.stats.totalTrades += 1;
+            this.stats.successfulTrades += 1;
+            this.stats.totalProfit += profit;
+            this.stats.todayProfit += profit;
+
+            // 更新交易對觸發記錄
+            const updatedPair = this.monitoringPairs.get(id);
+            if (updatedPair) {
+                updatedPair.lastTriggered = Date.now();
+                updatedPair.totalTriggers += 1;
+                updatedPair.consumedAmount = (updatedPair.consumedAmount || 0) + (pairConfig.qty || pairConfig.amount);
+                this.monitoringPairs.set(id, updatedPair);
+            }
+
+            const result = {
+                success: true,
+                leg1: leg1Result,
+                leg2: leg2Result,
+                profit: profit,
+                spread: opportunity.spread,
+                spreadPercent: opportunity.spreadPercent,
+                executionTime: executionTime,
+                timestamp: Date.now(),
+                mock: true,
+                message: 'Mock 套利交易執行成功'
+            };
+
+            logger.info('✅ Mock 套利交易完成', result);
+
+            // 發送執行完成事件
+            this.emit('arbitrageExecuted', {
+                opportunity,
+                result,
+                success: true,
+                mock: true
+            });
+
+            return result;
+
+        } catch (error) {
+            logger.error('Mock 套利交易失敗:', error);
+            
+            const result = {
+                success: false,
+                error: error.message,
+                timestamp: Date.now(),
+                mock: true
+            };
+
+            this.emit('arbitrageExecuted', {
+                opportunity,
+                result,
+                success: false,
+                mock: true
+            });
+
+            return result;
+        }
     }
 
     /**
@@ -495,21 +828,36 @@ class ArbitrageEngine extends EventEmitter {
         const startTime = Date.now();
 
         try {
-            logger.arbitrage('開始執行套利交易', {
+            logger.info('開始執行套利交易', {
                 pairId: id,
                 direction,
                 spread: opportunity.spread,
-                spreadPercent: opportunity.spreadPercent
+                spreadPercent: opportunity.spreadPercent,
+                mockMode: this.mockMode
             });
 
-            // 風險檢查
-            const riskCheck = this.performRiskCheck(pairConfig.amount);
+            // 關閉 Mock 模式：一律走真實執行（如無金鑰，交易所層會拋錯）
+            // if (this.mockMode) {
+            //     return await this.executeMockArbitrage(opportunity);
+            // }
+
+            // 風險檢查 - 使用新的風控系統
+            const riskCheck = this.performRiskCheck(pairConfig.qty || pairConfig.amount, opportunity);
             if (!riskCheck.passed) {
-                logger.risk('套利交易被風控阻止', riskCheck);
-                return { success: false, reason: riskCheck.reason };
+                logger.warn('套利交易被風控阻止', riskCheck);
+                return { 
+                    success: false, 
+                    reason: riskCheck.reason,
+                    riskChecks: riskCheck.checks,
+                    failedChecks: riskCheck.failedChecks
+                };
             }
 
-            // 準備雙腿訂單
+            // 添加到活躍交易追蹤
+            this.activeTrades.add(id);
+
+            // 準備雙腿訂單 - 使用 qty 參數
+            const orderAmount = pairConfig.qty || pairConfig.amount;
             let leg1Order, leg2Order;
 
             if (direction === 'leg1_sell_leg2_buy') {
@@ -517,13 +865,13 @@ class ArbitrageEngine extends EventEmitter {
                 leg1Order = {
                     symbol: pairConfig.leg1.symbol,
                     side: 'sell',
-                    amount: pairConfig.amount,
+                    amount: orderAmount,
                     type: 'market'
                 };
                 leg2Order = {
                     symbol: pairConfig.leg2.symbol,
                     side: 'buy',
-                    amount: pairConfig.amount,
+                    amount: orderAmount,
                     type: 'market'
                 };
             } else {
@@ -531,13 +879,13 @@ class ArbitrageEngine extends EventEmitter {
                 leg1Order = {
                     symbol: pairConfig.leg1.symbol,
                     side: 'buy',
-                    amount: pairConfig.amount,
+                    amount: orderAmount,
                     type: 'market'
                 };
                 leg2Order = {
                     symbol: pairConfig.leg2.symbol,
                     side: 'sell',
-                    amount: pairConfig.amount,
+                    amount: orderAmount,
                     type: 'market'
                 };
             }
@@ -612,6 +960,9 @@ class ArbitrageEngine extends EventEmitter {
             });
 
             return { success: false, error: error.message };
+        } finally {
+            // 清理活躍交易追蹤
+            this.activeTrades.delete(id);
         }
     }
 
@@ -794,15 +1145,17 @@ class ArbitrageEngine extends EventEmitter {
     addTwapStrategy(config) {
         const {
             id,
-            exchange = 'bybit',
             symbol,
             side, // 'buy' or 'sell'
             totalAmount,
-            timeInterval, // 執行間隔（毫秒）
             orderCount, // 分割訂單數量
-            priceType = 'market', // 'market' or 'limit'
             enabled = true
         } = config;
+
+        // 預設與約束：只允許 Bybit、只允許 MARKET（時間間隔不設下限，由前端/用戶決定）
+        const exchange = 'bybit';
+        const priceType = 'market';
+        const timeInterval = parseInt(config.timeInterval || 1000); // ms, 若未填預設 1s
 
         const strategy = {
             id,
@@ -810,7 +1163,7 @@ class ArbitrageEngine extends EventEmitter {
             symbol,
             side,
             totalAmount: parseFloat(totalAmount),
-            timeInterval: parseInt(timeInterval),
+            timeInterval,
             orderCount: parseInt(orderCount),
             amountPerOrder: parseFloat(totalAmount) / parseInt(orderCount),
             priceType,
@@ -859,15 +1212,47 @@ class ArbitrageEngine extends EventEmitter {
         const { id, exchange, symbol, side, amountPerOrder, priceType } = strategy;
 
         try {
+            // 檢查交易所是否具備下單能力（需要認證 REST 客戶端）
+            const ex = this.exchanges[exchange];
+            const hasAuthClient = !!(ex && ex.restClient && ex.config && ex.config.apiKey && ex.config.secret);
+            if (!hasAuthClient) {
+                logger.warn(`TWAP 跳過：${exchange} 未配置 API 金鑰或不支援下單`);
+                // 將策略暫停避免重複報錯
+                strategy.status = 'paused';
+                this.emit('twapOrderExecuted', { strategy, result: { success: false, error: 'UNAUTHORIZED_OR_PUBLIC_ONLY' } });
+                return;
+            }
+
             let result;
             
             if (priceType === 'market') {
-                result = await this.exchanges[exchange].placeMarketOrder(symbol, side, amountPerOrder);
+                if (typeof ex.placeMarketOrder === 'function') {
+                    result = await ex.placeMarketOrder(symbol, side, amountPerOrder);
+                } else if (typeof ex.placeOrder === 'function') {
+                    // 不同交易所下單參數鍵不一致，這裡做簡單映射（目前僅 Bybit 需要 qty/orderType）
+                    const params = (exchange === 'bybit')
+                        ? { symbol, side, orderType: 'Market', qty: amountPerOrder, category: 'linear' }
+                        : { symbol, side, amount: amountPerOrder, type: 'market' };
+                    result = await ex.placeOrder(params);
+                } else {
+                    throw new Error(`${exchange} 不支援市價單下單接口`);
+                }
             } else {
                 // 限價單需要獲取當前市價
                 const orderBook = await this.exchanges[exchange].getOrderBook(symbol);
-                const price = side === 'buy' ? orderBook.ask1.price : orderBook.bid1.price;
-                result = await this.exchanges[exchange].placeLimitOrder(symbol, side, amountPerOrder, price);
+                const bestAsk = orderBook?.asks?.[0]?.[0] || orderBook?.ask1?.price;
+                const bestBid = orderBook?.bids?.[0]?.[0] || orderBook?.bid1?.price;
+                const price = side === 'buy' ? Number(bestAsk) : Number(bestBid);
+                if (typeof ex.placeLimitOrder === 'function') {
+                    result = await ex.placeLimitOrder(symbol, side, amountPerOrder, price);
+                } else if (typeof ex.placeOrder === 'function') {
+                    const params = (exchange === 'bybit')
+                        ? { symbol, side, orderType: 'Limit', qty: amountPerOrder, price, category: 'linear' }
+                        : { symbol, side, amount: amountPerOrder, type: 'limit', price };
+                    result = await ex.placeOrder(params);
+                } else {
+                    throw new Error(`${exchange} 不支援限價單下單接口`);
+                }
             }
 
             // 更新策略狀態

@@ -221,7 +221,14 @@ export const exchangeApi = {
   },
 
   // 計算套利機會
-  calculateArbitrageOpportunity: (leg1Ticker: TickerData, leg2Ticker: TickerData, leg1Side: 'buy' | 'sell', leg2Side: 'buy' | 'sell') => {
+  calculateArbitrageOpportunity: (
+    leg1Ticker: TickerData,
+    leg2Ticker: TickerData,
+    leg1Side: 'buy' | 'sell',
+    leg2Side: 'buy' | 'sell',
+    leg1Exchange: string,
+    leg2Exchange: string
+  ) => {
     // 根據交易方向獲取正確的價格
     const leg1Price = leg1Side === 'buy' ? leg1Ticker.askPrice : leg1Ticker.bidPrice;
     const leg2Price = leg2Side === 'buy' ? leg2Ticker.askPrice : leg2Ticker.bidPrice;
@@ -247,13 +254,13 @@ export const exchangeApi = {
     return {
       leg1Price: {
         symbol: leg1Ticker.symbol,
-        exchange: 'bybit', // 需要從調用方傳入
+        exchange: leg1Exchange,
         bid1: { price: leg1Ticker.bidPrice },
         ask1: { price: leg1Ticker.askPrice }
       },
       leg2Price: {
         symbol: leg2Ticker.symbol,
-        exchange: 'binance', // 需要從調用方傳入
+        exchange: leg2Exchange,
         bid1: { price: leg2Ticker.bidPrice },
         ask1: { price: leg2Ticker.askPrice }
       },

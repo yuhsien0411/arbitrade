@@ -17,10 +17,10 @@ let pollingTimers: Map<string, any> = new Map();
  * 連接WebSocket
  */
 export function connectWebSocket(dispatch: AppDispatch) {
-  const serverUrl = process.env.REACT_APP_SERVER_URL || 'http://localhost:5000';
+  const serverUrl = process.env.REACT_APP_SERVER_URL || 'http://localhost:7000';
   
   // 創建WebSocket連接（使用原生WebSocket而不是socket.io）
-  const wsUrl = serverUrl.replace('http', 'ws');
+  const wsUrl = serverUrl.replace('http', 'ws') + '/ws';
   const ws = new WebSocket(wsUrl);
   wsRef = ws;
 

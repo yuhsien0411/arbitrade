@@ -3,7 +3,7 @@
  * 參考Taoli Tools設計，實現專業的雙腿下單功能
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Row, Col, Card, Form, Select, InputNumber, Button, Table, Space, 
   Typography, Tag, Switch, Modal, Divider, Alert, Tooltip, Input, App as AntdApp
@@ -59,6 +59,16 @@ const ArbitragePage: React.FC = () => {
   const { monitoringPairs: rawMonitoringPairs, currentOpportunities } = useSelector((state: RootState) => state.arbitrage);
   // 將 monitoringPairs 轉換為擴展類型以支援新參數
   const monitoringPairs = rawMonitoringPairs as ArbitragePairExtended[];
+  // 避免 effect 依賴變更導致反覆重建 interval：用 ref 保存最新列表
+  const monitoringPairsRef = useRef<ArbitragePairExtended[]>(monitoringPairs);
+  useEffect(() => { monitoringPairsRef.current = monitoringPairs; }, [monitoringPairs]);
+
+  // 最近一次已渲染的價格快照，用於跳過無變化的更新，降低閃爍
+  const lastSnapshotRef = useRef<Record<string, { l1b: number; l1a: number; l2b: number; l2a: number }>>({});
+  // 更新節流：對齊 bybit 的穩定感，每個 pair 最快 1s 更新一次
+  const lastUpdateAtRef = useRef<Record<string, number>>({});
+  // 上一次有效價，用於 UI 顯示回退（避免顯示 '-')
+  const lastGoodPriceRef = useRef<Record<string, { l1b: number; l1a: number; l2b: number; l2a: number }>>({});
   
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -80,9 +90,9 @@ const ArbitragePage: React.FC = () => {
       key: 'binance',
       name: 'Binance',
       supportCustomSymbol: true,
-      description: '支援用戶自行輸入交易對',
-      status: 'ready',
-      implemented: true,
+      description: '暫不啟用（保留）',
+      status: 'planned',
+      implemented: false,
       connected: false
     }
   ];
@@ -132,41 +142,86 @@ const ArbitragePage: React.FC = () => {
       }
     })();
     
-    // 直接從交易所獲取 ticker 數據，而不是通過後端
+    // 統一透過後端價格代理獲取訂單簿，再轉成簡化 ticker 結構
     const fetchTickerData = async () => {
       try {
-        logger.info('開始獲取 ticker 數據', { monitoringPairsCount: monitoringPairs.length }, 'ArbitragePage');
+        const pairs = monitoringPairsRef.current || [];
+        logger.info('開始獲取 ticker 數據', { monitoringPairsCount: pairs.length }, 'ArbitragePage');
         // 如果有監控交易對，直接從交易所獲取數據
-        if (monitoringPairs.length > 0) {
-          for (const pair of monitoringPairs) {
+        if (pairs.length > 0) {
+          for (const pair of pairs) {
             try {
+              // 基本資料校驗（避免 undefined 造成報錯）
+              if (!pair || !pair.leg1 || !pair.leg2 || !pair.leg1.exchange || !pair.leg2.exchange || !pair.leg1.symbol || !pair.leg2.symbol) {
+                logger.warn('監控交易對資料不完整，已跳過', pair as any, 'ArbitragePage');
+                continue;
+              }
+
+              // 跳過被暫停的交易所（保留但不抓價）
+              const disabledExchanges = new Set(['binance', 'okx', 'bitget']);
+              if (disabledExchanges.has(pair.leg1.exchange) || disabledExchanges.has(pair.leg2.exchange)) {
+                continue;
+              }
+
               logger.info(`獲取交易對 ${pair.id} 的價格數據`, {
                 leg1: `${pair.leg1.exchange}:${pair.leg1.symbol}`,
                 leg2: `${pair.leg2.exchange}:${pair.leg2.symbol}`
               }, 'ArbitragePage');
               
-              // 並行獲取兩個交易所的 ticker 數據
-              const [leg1Ticker, leg2Ticker] = await Promise.allSettled([
-                exchangeApi.bybit.getTicker(pair.leg1.symbol),
-                // 使用後端API獲取Binance數據，避免CORS問題
-                fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:5000'}/api/prices/binance/${pair.leg2.symbol}`)
-                  .then(res => res.json())
-                  .then(data => {
-                    if (data.success && data.data) {
-                      return {
-                        symbol: data.data.symbol,
-                        bidPrice: data.data.bids?.[0]?.[0] || 0,
-                        askPrice: data.data.asks?.[0]?.[0] || 0,
-                        lastPrice: 0,
-                        volume: 0,
-                        timestamp: data.data.timestamp
-                      };
-                    }
-                    throw new Error('Binance API 返回數據格式錯誤');
-                  })
-              ]);
+              const apiBase = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+              const legToCategory = (leg: any) => {
+                const t = (leg?.type || '').toString().toLowerCase();
+                return t === 'future' || t === 'futures' || t === 'linear' || t === 'inverse' ? 'futures' : 'spot';
+              };
+              const buildTickerUrl = (leg: any) => `${apiBase}/api/ticker/${leg.exchange}/${leg.symbol}?category=${legToCategory(leg)}`;
+              const buildOrderbookUrl = (leg: any) => `${apiBase}/api/prices/${leg.exchange}/${leg.symbol}`;
 
+              const fetchTickerForLeg = async (leg: any) => {
+                // 先用公開 ticker；若無效或為 0，改用訂單簿 top1 作為回退
+                try {
+                  const res = await fetch(buildTickerUrl(leg));
+                  const data = await res.json();
+                  if (data?.success && data?.data) {
+                    const tk = data.data;
+                    const bid = Number(tk?.bid1?.price || 0);
+                    const ask = Number(tk?.ask1?.price || 0);
+                    if (bid > 0 || ask > 0) {
+                      return { symbol: leg.symbol, bidPrice: bid, askPrice: ask, lastPrice: 0, volume: 0, timestamp: tk?.ts || Date.now() };
+                    }
+                  }
+                } catch {}
+                // 回退到訂單簿
+                try {
+                  const res2 = await fetch(buildOrderbookUrl(leg));
+                  const json2 = await res2.json();
+                  const bid1 = json2?.data?.bids?.[0]?.[0];
+                  const ask1 = json2?.data?.asks?.[0]?.[0];
+                  return {
+                    symbol: leg.symbol,
+                    bidPrice: Number(bid1 || 0),
+                    askPrice: Number(ask1 || 0),
+                    lastPrice: 0,
+                    volume: 0,
+                    timestamp: Date.now()
+                  };
+                } catch {
+                  throw new Error('公開 ticker 與訂單簿回退皆失敗');
+                }
+              };
+
+              // 並行從後端取得最優價（含回退）
+              const [leg1Ticker, leg2Ticker] = await Promise.allSettled([
+                fetchTickerForLeg(pair.leg1),
+                fetchTickerForLeg(pair.leg2)
+              ]);
+              
               if (leg1Ticker.status === 'fulfilled' && leg2Ticker.status === 'fulfilled') {
+                // 忽略無效數據（bid/ask 皆為 0）以避免畫面顯示 0 與閃爍
+                const validLeg1 = (leg1Ticker.value.bidPrice || 0) > 0 || (leg1Ticker.value.askPrice || 0) > 0;
+                const validLeg2 = (leg2Ticker.value.bidPrice || 0) > 0 || (leg2Ticker.value.askPrice || 0) > 0;
+                if (!validLeg1 || !validLeg2) {
+                  continue;
+                }
                 logger.info(`成功獲取交易對 ${pair.id} 的價格數據`, {
                   leg1: leg1Ticker.value,
                   leg2: leg2Ticker.value
@@ -177,10 +232,40 @@ const ArbitragePage: React.FC = () => {
                   leg1Ticker.value,
                   leg2Ticker.value,
                   (pair.leg1.side as 'buy' | 'sell') || 'buy',
-                  (pair.leg2.side as 'buy' | 'sell') || 'sell'
+                  (pair.leg2.side as 'buy' | 'sell') || 'sell',
+                  pair.leg1.exchange,
+                  pair.leg2.exchange
                 );
                 
+                // 若價格與上次相同就跳過，以減少重繪
+                const snapKey = pair.id;
+                const nextSnap = {
+                  l1b: opportunity.leg1Price.bid1.price,
+                  l1a: opportunity.leg1Price.ask1.price,
+                  l2b: opportunity.leg2Price.bid1.price,
+                  l2a: opportunity.leg2Price.ask1.price
+                };
+                const prevSnap = lastSnapshotRef.current[snapKey];
+                if (prevSnap && prevSnap.l1b === nextSnap.l1b && prevSnap.l1a === nextSnap.l1a && prevSnap.l2b === nextSnap.l2b && prevSnap.l2a === nextSnap.l2a) {
+                  continue;
+                }
+                lastSnapshotRef.current[snapKey] = nextSnap;
+
+                // 每個 pair 做 1000ms 節流，令 Binance 刷新節奏與 Bybit 接近
+                const nowTs = Date.now();
+                if ((lastUpdateAtRef.current[snapKey] || 0) > nowTs - 1000) {
+                  continue;
+                }
+                lastUpdateAtRef.current[snapKey] = nowTs;
+
                 logger.info(`交易對 ${pair.id} 套利機會計算結果`, opportunity, 'ArbitragePage');
+
+                // 使用回退：若計算結果不存在或為 0，回退到上一筆有效價
+                const fallbackPrev = lastGoodPriceRef.current[snapKey];
+                const safeL1b = opportunity.leg1Price.bid1.price || fallbackPrev?.l1b || 0;
+                const safeL1a = opportunity.leg1Price.ask1.price || fallbackPrev?.l1a || 0;
+                const safeL2b = opportunity.leg2Price.bid1.price || fallbackPrev?.l2b || 0;
+                const safeL2a = opportunity.leg2Price.ask1.price || fallbackPrev?.l2a || 0;
 
                 // 更新 Redux store
                 dispatch(updateOpportunity({
@@ -200,13 +285,15 @@ const ArbitragePage: React.FC = () => {
                   },
                   leg1Price: {
                     ...opportunity.leg1Price,
-                    bid1: { price: opportunity.leg1Price.bid1.price, amount: 0 },
-                    ask1: { price: opportunity.leg1Price.ask1.price, amount: 0 }
+                    exchange: pair.leg1.exchange,
+                    bid1: { price: safeL1b, amount: 0 },
+                    ask1: { price: safeL1a, amount: 0 }
                   },
                   leg2Price: {
                     ...opportunity.leg2Price,
-                    bid1: { price: opportunity.leg2Price.bid1.price, amount: 0 },
-                    ask1: { price: opportunity.leg2Price.ask1.price, amount: 0 }
+                    exchange: pair.leg2.exchange,
+                    bid1: { price: safeL2b, amount: 0 },
+                    ask1: { price: safeL2a, amount: 0 }
                   },
                   spread: opportunity.spread,
                   spreadPercent: opportunity.spreadPercent,
@@ -217,6 +304,14 @@ const ArbitragePage: React.FC = () => {
                     ? 'leg1_sell_leg2_buy' 
                     : 'leg1_buy_leg2_sell'
                 }));
+
+                // 記錄本次有效價，供下次回退使用
+                lastGoodPriceRef.current[snapKey] = {
+                  l1b: safeL1b,
+                  l1a: safeL1a,
+                  l2b: safeL2b,
+                  l2a: safeL2a
+                };
               }
             } catch (error) {
               logger.error(`獲取交易對 ${pair.id} 價格失敗`, error, 'ArbitragePage');
@@ -255,8 +350,11 @@ const ArbitragePage: React.FC = () => {
       }
     };
 
-    // 定期獲取價格數據（降低頻率到 10 秒）
-    const priceInterval = setInterval(fetchTickerData, 10000);
+    // 先立即抓一次，避免初始畫面無數據
+    fetchTickerData();
+
+    // 定期獲取價格數據（調整為每 5 秒）
+    const priceInterval = setInterval(fetchTickerData, 5000);
 
     // 清理定時器
     return () => {
@@ -297,7 +395,7 @@ const ArbitragePage: React.FC = () => {
       };
 
       logger.info('構建的監控配置', config, 'ArbitragePage');
-      
+
       let response;
       if (editingPair) {
         logger.info('更新現有監控交易對', editingPair.id, 'ArbitragePage');
@@ -565,17 +663,17 @@ const ArbitragePage: React.FC = () => {
           return <Text type="secondary">數據載入中...</Text>;
         }
         return (
-          <Space direction="vertical" size="small">
+        <Space direction="vertical" size="small">
             <Text strong>{record.leg1.symbol || 'N/A'}</Text>
-            <Text type="secondary" style={{ fontSize: '12px' }}>
-              {exchanges[record.leg1.exchange]?.name} {
-                record.leg1.type === 'spot' ? '現貨' : 
-                record.leg1.type === 'linear' ? '線性合約' : 
-                record.leg1.type === 'inverse' ? '反向合約' : 
-                record.leg1.type === 'future' ? '線性合約' : record.leg1.type
-              } · {record.leg1.side === 'sell' ? '賣出' : '買入'}
-            </Text>
-          </Space>
+          <Text type="secondary" style={{ fontSize: '12px' }}>
+            {exchanges[record.leg1.exchange]?.name} {
+              record.leg1.type === 'spot' ? '現貨' : 
+              record.leg1.type === 'linear' ? '線性合約' : 
+              record.leg1.type === 'inverse' ? '反向合約' : 
+              record.leg1.type === 'future' ? '線性合約' : record.leg1.type
+            } · {record.leg1.side === 'sell' ? '賣出' : '買入'}
+          </Text>
+        </Space>
         );
       },
     },
@@ -587,17 +685,17 @@ const ArbitragePage: React.FC = () => {
           return <Text type="secondary">數據載入中...</Text>;
         }
         return (
-          <Space direction="vertical" size="small">
+        <Space direction="vertical" size="small">
             <Text strong>{record.leg2.symbol || 'N/A'}</Text>
-            <Text type="secondary" style={{ fontSize: '12px' }}>
-              {exchanges[record.leg2.exchange]?.name} {
-                record.leg2.type === 'spot' ? '現貨' : 
-                record.leg2.type === 'linear' ? '線性合約' : 
-                record.leg2.type === 'inverse' ? '反向合約' : 
-                record.leg2.type === 'future' ? '線性合約' : record.leg2.type
-              } · {record.leg2.side === 'sell' ? '賣出' : '買入'}
-            </Text>
-          </Space>
+          <Text type="secondary" style={{ fontSize: '12px' }}>
+            {exchanges[record.leg2.exchange]?.name} {
+              record.leg2.type === 'spot' ? '現貨' : 
+              record.leg2.type === 'linear' ? '線性合約' : 
+              record.leg2.type === 'inverse' ? '反向合約' : 
+              record.leg2.type === 'future' ? '線性合約' : record.leg2.type
+            } · {record.leg2.side === 'sell' ? '賣出' : '買入'}
+          </Text>
+        </Space>
         );
       },
     },
@@ -1004,8 +1102,8 @@ const ArbitragePage: React.FC = () => {
                   <Text strong style={{ fontSize: '16px' }}>{exchange.name}</Text>
                   <Tag 
                     color={
-                      exchange.status === 'active' ? 'green' : 
-                      exchange.status === 'ready' ? 'blue' : 
+                      exchange.status === 'active' ? 'green' :
+                      exchange.status === 'ready' ? 'blue' :
                       exchange.status === 'planned' ? 'orange' : 'default'
                     }
                   >
@@ -1013,8 +1111,6 @@ const ArbitragePage: React.FC = () => {
                      exchange.status === 'ready' ? '就緒' : 
                      exchange.status === 'planned' ? '計劃中' : '未知'}
                   </Tag>
-                  {!exchange.implemented && <Tag color="red">未實現</Tag>}
-                  {!exchange.connected && exchange.implemented && <Tag color="yellow">未連接</Tag>}
                 </Space>
               </Card>
             </Col>
@@ -1022,22 +1118,6 @@ const ArbitragePage: React.FC = () => {
         </Row>
       </Card>
 
-      {/* 使用說明 */}
-      <Card style={{ marginBottom: 24 }} className="card-shadow">
-        <Alert
-          message="使用說明"
-          description={
-            <div>
-              <p>• <strong>Leg 1 & Leg 2</strong>：選擇要進行套利的兩個交易對，系統會監控它們的價差</p>
-              <p>• <strong>觸發閾值</strong>：當價差達到設定的百分比時，系統會自動執行套利交易</p>
-              <p>• <strong>Bid1/Ask1 監控</strong>：系統即時監控最優買一價和賣一價，確保價差計算的準確性</p>
-              <p>• <strong>一鍵下單</strong>：當條件滿足時，可以手動執行或設置自動執行雙腿下單</p>
-            </div>
-          }
-          type="info"
-          showIcon
-        />
-      </Card>
 
       {/* 監控交易對列表 */}
       <Card title="📊 監控交易對" className="card-shadow">
@@ -1078,14 +1158,14 @@ const ArbitragePage: React.FC = () => {
           form={form}
           layout="vertical"
           onFinish={handleSubmit}
-        initialValues={{
-          enabled: true,
-          threshold: 0.1,
+          initialValues={{
+            enabled: true,
+            threshold: 0.1,
           amount: 100.0, // 舊參數保留
           qty: 0.01,
           totalAmount: 1000,
           executionMode: 'threshold',
-        }}
+          }}
         >
           {/* 常用交易對快捷選擇 */}
           <Alert
@@ -1286,7 +1366,7 @@ const ArbitragePage: React.FC = () => {
             </Col>
           </Row>
 
-        <Divider />
+          <Divider />
 
 
           
@@ -1318,7 +1398,7 @@ const ArbitragePage: React.FC = () => {
             <Col span={8}>
               <Form.Item
                 name="amount"
-                label="交易數量"
+                label="總交易數量"
                 rules={[
                   { required: true, message: '請輸入交易數量' },
                   { type: 'number', min: 0.001, message: '數量必須大於 0.001' }
@@ -1345,17 +1425,6 @@ const ArbitragePage: React.FC = () => {
                   <Space>
                     <span>觸發閾值 (%)</span>
                     <Form.Item name="executionMode" noStyle>
-                      <Switch
-                        checkedChildren="差價模式"
-                        unCheckedChildren="市價模式"
-                        onChange={(checked) => {
-                          // 強制重新渲染表單項
-                          form.setFieldsValue({ executionMode: checked });
-                          form.validateFields(['threshold']);
-                          message.info(`已切換為${checked ? '差價模式' : '市價模式'}`);
-                        }}
-                        size="small"
-                      />
                     </Form.Item>
                   </Space>
                 }
@@ -1371,7 +1440,6 @@ const ArbitragePage: React.FC = () => {
                       precision={2}
                       style={{ width: '100%' }}
                       placeholder="0.10"
-                      disabled={!getFieldValue('executionMode')}
                     />
                   )}
                 </Form.Item>

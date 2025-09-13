@@ -294,6 +294,10 @@ class BinanceExchange extends BaseExchange {
    */
   async getBalance(currency = null) {
     try {
+      if (this.publicOnly) {
+        throw new Error('Binance 公開數據模式：無法獲取餘額，需要API密鑰');
+      }
+
       const startTime = Date.now();
       const balance = await this.restClient.getBalance();
       const responseTime = Date.now() - startTime;
@@ -309,6 +313,35 @@ class BinanceExchange extends BaseExchange {
       this.updateStats(false);
       logger.error(`[BinanceExchange] 獲取餘額失敗:`, error);
       throw error;
+    }
+  }
+
+  /**
+   * 獲取持倉信息
+   */
+  async getPositions() {
+    try {
+      if (this.publicOnly) {
+        throw new Error('Binance 公開數據模式：無法獲取持倉，需要API密鑰');
+      }
+
+      const startTime = Date.now();
+      const positions = await this.restClient.getPositions();
+      const responseTime = Date.now() - startTime;
+      
+      this.updateStats(true, responseTime);
+      
+      return {
+        success: true,
+        data: { list: positions || [] }
+      };
+    } catch (error) {
+      this.updateStats(false);
+      logger.error(`[BinanceExchange] 獲取持倉失敗:`, error);
+      return {
+        success: false,
+        error: error.message
+      };
     }
   }
 

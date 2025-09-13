@@ -335,12 +335,12 @@ class BybitExchange extends BaseExchange {
       const startTime = Date.now();
       
       // 獲取錢包餘額
-      const walletResponse = await this.restClient.get('wallet/balance', {
+      const walletResponse = await this.restClient.get('v5/wallet/balance', {
         accountType: 'UNIFIED'
       });
 
       // 獲取持倉信息
-      const positionResponse = await this.restClient.get('position/list', {
+      const positionResponse = await this.restClient.get('v5/position/list', {
         category: 'linear'
       });
 
@@ -418,23 +418,73 @@ class BybitExchange extends BaseExchange {
         orderType = 'Market',
         qty,
         price,
-        category = 'linear'
+        category = 'linear',
+        // 進階參數（對齊 bybit v5）
+        timeInForce,
+        orderLinkId,
+        isLeverage,
+        orderFilter,
+        reduceOnly,
+        positionIdx,
+        takeProfit,
+        stopLoss,
+        tpslMode,
+        tpOrderType,
+        slOrderType,
+        tpLimitPrice,
+        slLimitPrice,
+        triggerPrice,
+        quoteOrderQty,
+        postOnly
       } = orderParams;
+
+      // Bybit v5 需要 Buy/Sell 大小寫、v5 路徑
+      const bybitSide = (side || '').toLowerCase() === 'buy' ? 'Buy' : ((side || '').toLowerCase() === 'sell' ? 'Sell' : side);
 
       const orderData = {
         category: category,
         symbol: symbol,
-        side: side,
+        side: bybitSide,
         orderType: orderType,
-        qty: qty.toString()
+        // 現貨市價單可用報價幣種金額（quoteOrderQty）
+        qty: (category === 'spot' && orderType === 'Market' && (quoteOrderQty ?? null) !== null)
+          ? String(quoteOrderQty)
+          : String(qty)
       };
 
       if (orderType === 'Limit' && price) {
         orderData.price = price.toString();
       }
 
+      // timeInForce 預設：spot 市價 IOC，其餘 GTC；若 postOnly 指定則 PostOnly
+      if (timeInForce) {
+        orderData.timeInForce = timeInForce;
+      } else if (postOnly || orderFilter === 'PostOnly') {
+        orderData.timeInForce = 'PostOnly';
+      } else if (category === 'spot' && orderType === 'Market') {
+        orderData.timeInForce = 'IOC';
+      } else {
+        orderData.timeInForce = 'GTC';
+      }
+
+      // 其他可選欄位
+      if (orderLinkId) orderData.orderLinkId = orderLinkId;
+      if (typeof isLeverage === 'number') orderData.isLeverage = isLeverage; // spot 槓桿
+      if (orderFilter) orderData.orderFilter = orderFilter; // 'Order' | 'tpslOrder'
+      if (typeof reduceOnly === 'boolean') orderData.reduceOnly = reduceOnly;
+      if (typeof positionIdx === 'number') orderData.positionIdx = positionIdx;
+      if (takeProfit) orderData.takeProfit = String(takeProfit);
+      if (stopLoss) orderData.stopLoss = String(stopLoss);
+      if (tpslMode) orderData.tpslMode = tpslMode;
+      if (tpOrderType) orderData.tpOrderType = tpOrderType;
+      if (slOrderType) orderData.slOrderType = slOrderType;
+      if (tpLimitPrice) orderData.tpLimitPrice = String(tpLimitPrice);
+      if (slLimitPrice) orderData.slLimitPrice = String(slLimitPrice);
+      if (triggerPrice) orderData.triggerPrice = String(triggerPrice);
+
       logger.trading('送出下單', { side, orderType, symbol, qty, category });
 
+      // 注意：RestClientV5.post 會自動拼接 v5 前綴，這裡使用 'order/create'
       const response = await this.restClient.post('order/create', orderData);
 
       const responseTime = Date.now() - startTime;
@@ -557,7 +607,7 @@ class BybitExchange extends BaseExchange {
     try {
       const startTime = Date.now();
       
-      const response = await this.restClient.get('position/list', {
+      const response = await this.restClient.get('v5/position/list', {
         category: 'linear',
         symbol: symbol
       });
@@ -584,9 +634,13 @@ class BybitExchange extends BaseExchange {
 
   async getBalance(currency) {
     try {
+      if (this.publicOnly) {
+        throw new Error('Bybit 公開數據模式：無法獲取餘額，需要API密鑰');
+      }
+
       const startTime = Date.now();
       
-      const response = await this.restClient.get('wallet/balance', {
+      const response = await this.restClient.get('v5/wallet/balance', {
         accountType: 'UNIFIED',
         coin: currency
       });
@@ -604,6 +658,35 @@ class BybitExchange extends BaseExchange {
     } catch (error) {
       this.updateStats(false);
       logger.error('[BybitExchange] 獲取餘額信息失敗:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  async getPositions() {
+    try {
+      if (this.publicOnly) {
+        throw new Error('Bybit 公開數據模式：無法獲取持倉，需要API密鑰');
+      }
+
+      const startTime = Date.now();
+      
+      const response = await this.restClient.get('v5/position/list', {
+        category: 'linear'
+      });
+
+      const responseTime = Date.now() - startTime;
+      this.updateStats(true, responseTime);
+
+      return {
+        success: true,
+        data: response || { list: [] }
+      };
+    } catch (error) {
+      this.updateStats(false);
+      logger.error('[BybitExchange] 獲取持倉信息失敗:', error);
       return {
         success: false,
         error: error.message

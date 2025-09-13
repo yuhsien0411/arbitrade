@@ -9,8 +9,17 @@ const logger = require('../../utils/logger');
 class BinancePublicClient {
   constructor() {
     this.baseURL = 'https://api.binance.com';
+    this.futuresBaseURL = 'https://fapi.binance.com';
     this.client = axios.create({
       baseURL: this.baseURL,
+      timeout: 5000,
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'ArbitrageBot/1.0.0'
+      }
+    });
+    this.futuresClient = axios.create({
+      baseURL: this.futuresBaseURL,
       timeout: 5000,
       headers: {
         'Content-Type': 'application/json',
@@ -92,6 +101,34 @@ class BinancePublicClient {
         success: false,
         error: error.message
       };
+    }
+  }
+
+  /**
+   * 期貨 USDT-M 最優掛單 (bookTicker)
+   */
+  async getFuturesBookTicker(symbol) {
+    try {
+      const resp = await this.futuresClient.get('/fapi/v1/ticker/bookTicker', {
+        params: symbol ? { symbol } : {}
+      });
+
+      const data = Array.isArray(resp.data) ? resp.data[0] : resp.data;
+      return {
+        success: true,
+        data: {
+          symbol: data.symbol,
+          bidPrice: parseFloat(data.bidPrice),
+          bidQty: parseFloat(data.bidQty),
+          askPrice: parseFloat(data.askPrice),
+          askQty: parseFloat(data.askQty),
+          time: data.time || Date.now(),
+          timestamp: Date.now()
+        }
+      };
+    } catch (error) {
+      logger.error('[BinancePublicClient] 獲取期貨 bookTicker 失敗:', error);
+      return { success: false, error: error.message };
     }
   }
 

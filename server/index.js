@@ -2,7 +2,7 @@
  * 套利系統後端入口
  */
 
-require('dotenv').config();
+require('dotenv').config({ path: '../.env' });
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -11,6 +11,7 @@ const helmet = require('helmet');
 const compression = require('compression');
 const logger = require('./utils/logger');
 const apiRoutes = require('./routes/api');
+const CacheManager = require('./services/CacheManager');
 const { handleConnection } = require('./websocket/handler');
 const { startArbitrageEngine } = require('./services/arbitrageEngine');
 const OrderBookMonitor = require('./services/OrderBookMonitor');
@@ -61,6 +62,16 @@ async function startSystem() {
     try {
         logger.info('正在啟動套利系統...');
         
+        // 啟動前清空 API 與內部快取，確保乾淨狀態
+        try {
+            const startupCache = new CacheManager();
+            await startupCache.initialize();
+            await startupCache.flush();
+            logger.info('✅ 啟動前已清空所有緩存');
+        } catch (e) {
+            logger.warn('啟動前清空緩存失敗，將繼續啟動（可能使用內存快取）:', e.message);
+        }
+
         // 啟動套利引擎
         await startArbitrageEngine();
         logger.info('✅ 套利引擎啟動成功');

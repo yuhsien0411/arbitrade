@@ -99,12 +99,16 @@ const twapSlice = createSlice({
       if (strategyIndex >= 0 && action.payload.success) {
         const strategy = state.strategies[strategyIndex];
         strategy.executedOrders += 1;
-        strategy.remainingAmount -= action.payload.amount;
+        strategy.remainingAmount = Math.max(0, strategy.remainingAmount - action.payload.amount);
         strategy.nextExecutionTime = Date.now() + strategy.timeInterval;
         
-        // 檢查是否完成
-        if (strategy.executedOrders >= strategy.orderCount || strategy.remainingAmount <= 0) {
+        // 檢查是否完成（每次執行包含兩個腿）
+        const completedExecutions = Math.floor(strategy.executedOrders / 2);
+        if (completedExecutions >= strategy.orderCount) {
           strategy.status = 'completed';
+          strategy.remainingAmount = 0; // 確保完成時剩餘數量為 0
+        } else if (strategy.remainingAmount <= 0) {
+          strategy.remainingAmount = 0; // 確保不會出現負數
         }
       }
     },
