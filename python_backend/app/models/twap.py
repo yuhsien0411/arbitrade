@@ -20,7 +20,10 @@ class OrderTemplate(BaseModel):
     exchange: Literal["bybit", "binance"]
     symbol: str
     side: Literal["buy", "sell"]
+    # 下單型別（市價/限價）
     type: Literal["market", "limit"] = "market"
+    # 資產類別（現貨/合約）
+    category: Literal["spot", "linear"] = "spot"
     price: Optional[float] = None  # 限價單使用
 
 
@@ -56,6 +59,8 @@ class TwapExecution(BaseModel):
     qty: float
     ts: int = Field(default_factory=lambda: int(time.time() * 1000))
     error: Optional[str] = None
+    is_rollback: Optional[bool] = False
+    original_order_id: Optional[str] = None
 
 
 class CreateTwapRequest(BaseModel):

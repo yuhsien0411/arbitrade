@@ -204,15 +204,8 @@ export const exchangeApi = {
         }
       } catch (error) {
         console.error(`${exchange} ticker 獲取失敗:`, error);
-        // 提供默認值避免系統崩潰
-        results[exchange] = {
-          symbol,
-          bidPrice: 50000 + Math.random() * 1000,
-          askPrice: 50000 + Math.random() * 1000 + 10,
-          lastPrice: 50000 + Math.random() * 1000,
-          volume: 0,
-          timestamp: Date.now()
-        };
+        // 嚴格真實數據：失敗時丟出錯誤，由上層處理
+        throw error;
       }
     });
 

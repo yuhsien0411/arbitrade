@@ -19,6 +19,8 @@ import logger from './utils/logger';
 import { apiService } from './services/api';
 import { AppDispatch } from './store';
 import { updateExchanges } from './store/slices/systemSlice';
+import storage from './utils/storage';
+import { setMonitoringPairs, setOpportunities, clearExecutionHistory } from './store/slices/arbitrageSlice';
 
 const { Content } = Layout;
 
@@ -27,7 +29,7 @@ const App: React.FC = () => {
   const { message } = AntdApp.useApp();
 
   useEffect(() => {
-    // 載入交易所信息
+    // 載入交易所信息（延遲載入，避免初始請求）
     const loadExchanges = async () => {
       try {
         const response = await apiService.getExchanges();
@@ -39,7 +41,8 @@ const App: React.FC = () => {
       }
     };
 
-    loadExchanges();
+    // 延遲 2 秒載入，避免初始頁面載入時的請求
+    const timer = setTimeout(loadExchanges, 2000);
 
     // 連接WebSocket
     const cleanup = connectWebSocket(dispatch);
@@ -49,6 +52,7 @@ const App: React.FC = () => {
 
     // 清理函數
     return () => {
+      clearTimeout(timer);
       cleanup();
     };
   }, [dispatch, message]);

@@ -25,7 +25,7 @@ class Leg(BaseModel):
 class PairConfig(BaseModel):
     leg1: Leg
     leg2: Leg
-    threshold: float = Field(gt=0, description="價差閾值")
+    threshold: float = Field(description="價差閾值，可為負數代表反向觸發")
     qty: float = Field(gt=0, description="交易數量")
     totalAmount: float = Field(gt=0, description="總金額")
     direction: Literal["auto", "buy_first", "sell_first"] = "auto"
@@ -35,7 +35,7 @@ class PairConfig(BaseModel):
 class CreatePairRequest(BaseModel):
     leg1: Leg
     leg2: Leg
-    threshold: float = Field(gt=0)
+    threshold: float
     qty: float = Field(gt=0)
     totalAmount: float = Field(gt=0)
     direction: Literal["auto", "buy_first", "sell_first"] = "auto"
@@ -43,7 +43,7 @@ class CreatePairRequest(BaseModel):
 
 
 class UpdatePairRequest(BaseModel):
-    threshold: Optional[float] = Field(None, gt=0)
+    threshold: Optional[float] = None
     qty: Optional[float] = Field(None, gt=0)
     totalAmount: Optional[float] = Field(None, gt=0)
     direction: Optional[Literal["auto", "buy_first", "sell_first"]] = None
@@ -53,6 +53,23 @@ class UpdatePairRequest(BaseModel):
 def _generate_pair_id(leg1: Leg, leg2: Leg) -> str:
     """生成交易對ID"""
     return f"{leg1.exchange}_{leg2.exchange}_{leg1.symbol.lower()}"
+
+
+def _resolve_pair_id(pair_id: str) -> Optional[str]:
+    """嘗試在現有列表中解析對應的 pair_id（忽略大小寫等差異）。"""
+    if pair_id in monitoring_pairs:
+        return pair_id
+    # 常見情況：symbol 大小寫不同
+    lowered = pair_id.rsplit('_', 1)
+    if len(lowered) == 2:
+        alt = f"{lowered[0]}_{lowered[1].lower()}"
+        if alt in monitoring_pairs:
+            return alt
+    # 最後嘗試忽略大小寫比對
+    for key in monitoring_pairs.keys():
+        if key.lower() == pair_id.lower():
+            return key
+    return None
 
 
 @router.get("/monitoring/pairs")
@@ -70,14 +87,12 @@ async def get_monitoring_pairs():
 
 @router.post("/monitoring/pairs")
 async def create_monitoring_pair(request: CreatePairRequest):
-    """新增監控交易對"""
+    """新增監控交易對（支援覆蓋現有）"""
     pair_id = _generate_pair_id(request.leg1, request.leg2)
     
+    # 如果已存在，直接更新而不是報錯
     if pair_id in monitoring_pairs:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "CONFLICT", "message": "Pair already exists"}
-        )
+        logger.info("monitoring_pair_exists_updating", pairId=pair_id)
     
     config = {
         "leg1": request.leg1.dict(),
@@ -99,13 +114,14 @@ async def create_monitoring_pair(request: CreatePairRequest):
 @router.put("/monitoring/pairs/{pair_id}")
 async def update_monitoring_pair(pair_id: str, request: UpdatePairRequest):
     """更新監控交易對"""
-    if pair_id not in monitoring_pairs:
+    resolved_id = _resolve_pair_id(pair_id)
+    if not resolved_id:
         raise HTTPException(
             status_code=404,
             detail={"code": "NOT_FOUND", "message": "Pair not found"}
         )
     
-    config = monitoring_pairs[pair_id]
+    config = monitoring_pairs[resolved_id]
     
     # 更新非空欄位
     if request.threshold is not None:
@@ -119,7 +135,7 @@ async def update_monitoring_pair(pair_id: str, request: UpdatePairRequest):
     if request.enabled is not None:
         config["enabled"] = request.enabled
     
-    logger.info("pair_updated", pairId=pair_id, success=True)
+    logger.info("pair_updated", pairId=resolved_id, success=True)
     
     return {"success": True}
 
@@ -127,14 +143,15 @@ async def update_monitoring_pair(pair_id: str, request: UpdatePairRequest):
 @router.delete("/monitoring/pairs/{pair_id}")
 async def delete_monitoring_pair(pair_id: str):
     """刪除監控交易對"""
-    if pair_id not in monitoring_pairs:
+    resolved_id = _resolve_pair_id(pair_id)
+    if not resolved_id:
         raise HTTPException(
             status_code=404,
             detail={"code": "NOT_FOUND", "message": "Pair not found"}
         )
     
-    del monitoring_pairs[pair_id]
+    del monitoring_pairs[resolved_id]
     
-    logger.info("pair_deleted", pairId=pair_id, success=True)
+    logger.info("pair_deleted", pairId=resolved_id, success=True)
     
     return {"success": True}

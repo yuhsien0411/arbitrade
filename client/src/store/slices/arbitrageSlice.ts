@@ -5,6 +5,7 @@
 import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
 import { apiService } from '../../services/api';
 import logger from '../../utils/logger';
+import storage from '../../utils/storage';
 
 interface ArbitragePair {
   id: string;
@@ -71,13 +72,54 @@ interface ArbitrageState {
   executionHistory: ArbitrageExecution[];
 }
 
-const initialState: ArbitrageState = {
-  monitoringPairs: [],
-  currentOpportunities: [],
-  recentExecutions: [],
-  isAutoExecuteEnabled: false,
-  executionHistory: [],
+// 從本地存儲載入初始數據
+const loadInitialState = (): ArbitrageState => {
+  try {
+    const rawPairs = storage.load(storage.keys.MONITORING_PAIRS, []);
+    const rawOpportunities = storage.load(storage.keys.ARBITRAGE_OPPORTUNITIES, []);
+    
+    // 驗證並過濾監控交易對數據
+    const validPairs = Array.isArray(rawPairs) 
+      ? rawPairs.filter((pair: any) => 
+          pair && 
+          typeof pair === 'object' && 
+          pair.leg1 && 
+          typeof pair.leg1 === 'object' && 
+          pair.leg2 && 
+          typeof pair.leg2 === 'object' &&
+          pair.id
+        )
+      : [];
+    
+    // 驗證並過濾機會數據
+    const validOpportunities = Array.isArray(rawOpportunities)
+      ? rawOpportunities.filter((opp: any) => 
+          opp && 
+          typeof opp === 'object' && 
+          opp.id
+        )
+      : [];
+    
+    return {
+      monitoringPairs: validPairs,
+      currentOpportunities: validOpportunities,
+      recentExecutions: [],
+      isAutoExecuteEnabled: false,
+      executionHistory: [],
+    };
+  } catch (error) {
+    console.error('載入初始狀態失敗:', error);
+    return {
+      monitoringPairs: [],
+      currentOpportunities: [],
+      recentExecutions: [],
+      isAutoExecuteEnabled: false,
+      executionHistory: [],
+    };
+  }
 };
+
+const initialState: ArbitrageState = loadInitialState();
 
 export const addWatchPairThunk = createAsyncThunk(
   'arbitrage/addWatchPair',
@@ -108,6 +150,8 @@ const arbitrageSlice = createSlice({
       } else {
         state.monitoringPairs.push(action.payload);
       }
+      // 保存到本地存儲
+      storage.save(storage.keys.MONITORING_PAIRS, state.monitoringPairs);
     },
     
     updateMonitoringPair: (state, action: PayloadAction<{ id: string; updates: Partial<ArbitragePair> }>) => {
@@ -115,6 +159,8 @@ const arbitrageSlice = createSlice({
       const index = state.monitoringPairs.findIndex(p => p.id === id);
       if (index >= 0) {
         state.monitoringPairs[index] = { ...state.monitoringPairs[index], ...updates };
+        // 保存到本地存儲
+        storage.save(storage.keys.MONITORING_PAIRS, state.monitoringPairs);
       }
     },
     
@@ -122,10 +168,15 @@ const arbitrageSlice = createSlice({
       state.monitoringPairs = state.monitoringPairs.filter(p => p.id !== action.payload);
       // 同時移除相關的機會數據
       state.currentOpportunities = state.currentOpportunities.filter(o => o.id !== action.payload);
+      // 保存到本地存儲
+      storage.save(storage.keys.MONITORING_PAIRS, state.monitoringPairs);
+      storage.save(storage.keys.ARBITRAGE_OPPORTUNITIES, state.currentOpportunities);
     },
     
     setMonitoringPairs: (state, action: PayloadAction<ArbitragePair[]>) => {
       state.monitoringPairs = action.payload;
+      // 保存到本地存儲
+      storage.save(storage.keys.MONITORING_PAIRS, state.monitoringPairs);
     },
     
     updateOpportunity: (state, action: PayloadAction<ArbitrageOpportunity>) => {
@@ -135,10 +186,21 @@ const arbitrageSlice = createSlice({
       } else {
         state.currentOpportunities.push(action.payload);
       }
+      // 保存到本地存儲
+      storage.save(storage.keys.ARBITRAGE_OPPORTUNITIES, state.currentOpportunities);
     },
     
     setOpportunities: (state, action: PayloadAction<ArbitrageOpportunity[]>) => {
       state.currentOpportunities = action.payload;
+      // 保存到本地存儲
+      storage.save(storage.keys.ARBITRAGE_OPPORTUNITIES, state.currentOpportunities);
+    },
+    
+    // 覆蓋最近執行記錄（用於手動刷新避免重複累加）
+    setRecentExecutions: (state, action: PayloadAction<ArbitrageExecution[]>) => {
+      const list = Array.isArray(action.payload) ? action.payload : [];
+      // 僅保留最新20筆
+      state.recentExecutions = list.slice(0, 20);
     },
     
     addExecution: (state, action: PayloadAction<ArbitrageExecution>) => {
@@ -218,6 +280,7 @@ export const {
   setMonitoringPairs,
   updateOpportunity,
   setOpportunities,
+  setRecentExecutions,
   addExecution,
   setAutoExecute,
   clearExecutionHistory,

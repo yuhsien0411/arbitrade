@@ -13,6 +13,8 @@ from app.api.routes_prices import router as prices_router
 from app.api.routes_settings import router as settings_router
 from app.api.routes_monitoring import router as monitoring_router
 from app.api.routes_twap import router as twap_router
+from app.api.routes_arbitrage import router as arbitrage_router
+from app.services.arbitrage_engine import arb_engine
 
 
 @asynccontextmanager
@@ -20,9 +22,17 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger = get_logger()
     logger.info("service_start", success=True)
+    
+    # 啟動套利引擎
+    await arb_engine.start()
+    logger.info("arbitrage_engine_started", success=True)
+    
     try:
         yield
     finally:
+        # 停止套利引擎
+        await arb_engine.stop()
+        logger.info("arbitrage_engine_stopped", success=True)
         logger.info("service_stop", success=True)
 
 
@@ -53,6 +63,7 @@ app.include_router(prices_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
 app.include_router(monitoring_router, prefix="/api")
 app.include_router(twap_router, prefix="/api")
+app.include_router(arbitrage_router, prefix="/api")
 
 
 # WebSocket 連接管理

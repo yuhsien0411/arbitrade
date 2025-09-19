@@ -5,13 +5,18 @@
 
 import { AppDispatch } from '../store';
 import { setConnectionStatus, addNotification, updateEngineStatus } from '../store/slices/systemSlice';
-import { updateOpportunity, addExecution, setMonitoringPairs } from '../store/slices/arbitrageSlice';
+import { updateOpportunity, addExecution, setMonitoringPairs, removeMonitoringPair } from '../store/slices/arbitrageSlice';
+import { apiService } from './api';
 import { addExecution as addTwapExecution, setStrategies } from '../store/slices/twapSlice';
 import { updatePrice } from '../store/slices/pricesSlice';
 import logger from '../utils/logger';
 
 let wsRef: WebSocket | null = null;
 let pollingTimers: Map<string, any> = new Map();
+let reconnectTimer: NodeJS.Timeout | null = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAY = 1500; // 1.5秒，加快重連
 
 /**
  * 連接WebSocket
@@ -21,6 +26,7 @@ export function connectWebSocket(dispatch: AppDispatch) {
   
   // 創建WebSocket連接（使用原生WebSocket而不是socket.io）
   const wsUrl = serverUrl.replace('http', 'ws') + '/ws';
+  logger.info('嘗試連接WebSocket', { wsUrl }, 'WebSocket');
   const ws = new WebSocket(wsUrl);
   wsRef = ws;
 
@@ -29,6 +35,7 @@ export function connectWebSocket(dispatch: AppDispatch) {
   ws.onopen = () => {
     logger.info('WebSocket連接成功', null, 'WebSocket');
     dispatch(setConnectionStatus('connected'));
+    reconnectAttempts = 0; // 重置重連計數
     dispatch(addNotification({
       type: 'success',
       message: 'WebSocket連接成功'
@@ -51,6 +58,22 @@ export function connectWebSocket(dispatch: AppDispatch) {
       type: 'warning',
       message: 'WebSocket連接已關閉'
     }));
+    
+    // 自動重連
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      reconnectAttempts++;
+      logger.info(`嘗試重連 WebSocket (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`, null, 'WebSocket');
+      
+      reconnectTimer = setTimeout(() => {
+        connectWebSocket(dispatch);
+      }, RECONNECT_DELAY);
+    } else {
+      logger.error('WebSocket 重連次數已達上限', null, 'WebSocket');
+      dispatch(addNotification({
+        type: 'error',
+        message: 'WebSocket 連接失敗，請手動重新整理頁面'
+      }));
+    }
   };
 
   ws.onerror = (error) => {
@@ -76,6 +99,16 @@ export function connectWebSocket(dispatch: AppDispatch) {
       ws.close();
     }
     wsRef = null;
+    
+    // 清理重連定時器
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    
+    // 重置重連計數
+    reconnectAttempts = 0;
+    
     // 清理所有輪詢
     pollingTimers.forEach((timer) => clearInterval(timer));
     pollingTimers.clear();
@@ -121,6 +154,12 @@ function handleWebSocketMessage(message: any, dispatch: AppDispatch) {
       if (data) {
         dispatch(updateOpportunity(data));
         
+        // 觸發自定義事件供 ArbitragePage 監聽
+        const customEvent = new CustomEvent('priceUpdate', { 
+          detail: { type: 'priceUpdate', data } 
+        });
+        window.dispatchEvent(customEvent);
+        
         // 同時更新價格數據
         if (data.leg1Price) {
           dispatch(updatePrice({
@@ -163,18 +202,86 @@ function handleWebSocketMessage(message: any, dispatch: AppDispatch) {
       break;
 
     case 'arbitrageExecuted':
-      // 套利執行完成
+      // 套利執行完成（標準化為 ArbitrageExecution 結構）
       if (data) {
+        const now = timestamp || Date.now();
+        const leg1 = data.leg1 || {};
+        const leg2 = data.leg2 || {};
         dispatch(addExecution({
-          ...data,
-          timestamp: timestamp || Date.now()
-        }));
-        
-        const message = data.success ? '套利執行成功' : `套利執行失敗: ${data.error}`;
+          opportunity: {
+            id: data.pairId,
+            pairConfig: {
+              id: data.pairId,
+              leg1: { exchange: leg1.exchange || '', symbol: leg1.symbol || '', type: leg1.type || 'spot', side: leg1.side || 'buy' },
+              leg2: { exchange: leg2.exchange || '', symbol: leg2.symbol || '', type: leg2.type || 'spot', side: leg2.side || 'sell' },
+              threshold: 0,
+              amount: data.qty || 0,
+              enabled: true,
+              createdAt: now,
+              lastTriggered: now,
+              totalTriggers: 0,
+            } as any,
+            leg1Price: { symbol: leg1.symbol, exchange: leg1.exchange, bid1: null, ask1: null },
+            leg2Price: { symbol: leg2.symbol, exchange: leg2.exchange, bid1: null, ask1: null },
+            spread: 0,
+            spreadPercent: 0,
+            threshold: 0,
+            shouldTrigger: false,
+            timestamp: now,
+            direction: 'leg1_buy_leg2_sell',
+          },
+          result: { leg1OrderId: data.leg1OrderId, leg2OrderId: data.leg2OrderId },
+          success: true,
+          timestamp: now,
+        } as any));
+
         dispatch(addNotification({
-          type: data.success ? 'success' : 'error',
-          message
+          type: 'success',
+          message: '套利執行成功'
         }));
+      }
+      break;
+
+    case 'pairRemoved':
+      // 後端達到次數上限後移除對，前端即時刷新監控對
+      if (data?.id) {
+        dispatch(addNotification({ type: 'info', message: `已完成並移除: ${data.id}` }));
+        // 直接從本地清單移除
+        dispatch(removeMonitoringPair(data.id));
+        // 立即同步最新監控清單與執行歷史，避免畫面殘留
+        (async () => {
+          try {
+            const [pairsRes, execRes] = await Promise.all([
+              apiService.getMonitoringPairs(),
+              apiService.getArbitrageExecutions()
+            ]);
+            if ((pairsRes as any)?.data) {
+              dispatch(setMonitoringPairs((pairsRes as any).data as any));
+            }
+            const hist = (execRes as any)?.data || {};
+            Object.values(hist || {}).forEach((list: any) => {
+              (list as any[]).forEach((item) => {
+                dispatch(addExecution({
+                  opportunity: {
+                    id: item.pairId,
+                    pairConfig: undefined as any,
+                    leg1Price: { symbol: item.leg1.symbol, exchange: item.leg1.exchange, bid1: null, ask1: null },
+                    leg2Price: { symbol: item.leg2.symbol, exchange: item.leg2.exchange, bid1: null, ask1: null },
+                    spread: 0,
+                    spreadPercent: 0,
+                    threshold: 0,
+                    shouldTrigger: false,
+                    timestamp: item.ts,
+                    direction: 'leg1_buy_leg2_sell'
+                  },
+                  result: { leg1OrderId: item.leg1.orderId, leg2OrderId: item.leg2.orderId },
+                  success: true,
+                  timestamp: item.ts
+                } as any));
+              });
+            });
+          } catch {}
+        })();
       }
       break;
 
@@ -290,7 +397,7 @@ export function subscribeTicker(exchange: string, symbol: string, dispatch: AppD
     return;
   }
 
-  // 後備：2秒輪詢
+  // 後備：10秒輪詢
   const key = `${exchange}:${symbol}`;
   if (pollingTimers.has(key)) return;
   const timer = setInterval(async () => {
@@ -320,7 +427,7 @@ export function subscribeTicker(exchange: string, symbol: string, dispatch: AppD
     } catch (e) {
       // 忽略輪詢錯誤，避免打擾使用者
     }
-  }, 2000);
+  }, 10000);
   pollingTimers.set(key, timer);
 }
 

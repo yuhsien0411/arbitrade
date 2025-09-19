@@ -347,12 +347,18 @@ class TWAPEngine:
 
     async def pause_plan(self, plan_id: str) -> bool:
         """暫停 TWAP 策略計畫"""
+        self.logger.info("twap_pause_plan_called", planId=plan_id, hasProgress=plan_id in self.progress)
+        
         if plan_id not in self.progress:
+            self.logger.warning("twap_pause_plan_not_found", planId=plan_id)
             return False
         
         progress = self.progress[plan_id]
+        self.logger.info("twap_pause_plan_state_check", planId=plan_id, currentState=progress.state.value)
+        
         # 允許暫停運行中的策略，即使有部分失敗
         if progress.state not in [TwapState.RUNNING, TwapState.PAUSED]:
+            self.logger.warning("twap_pause_plan_invalid_state", planId=plan_id, currentState=progress.state.value)
             return False
         
         progress.state = TwapState.PAUSED
@@ -398,6 +404,37 @@ class TWAPEngine:
         
         self.logger.info("twap_plan_cancelled", planId=plan_id, success=True)
         return True
+    
+    async def emergency_rollback(self, plan_id: str) -> bool:
+        """緊急回滾所有成功的腿"""
+        if plan_id not in self.plans:
+            return False
+        
+        plan = self.plans[plan_id]
+        executions = self.executions.get(plan_id, [])
+        
+        # 找出所有成功的腿（非回滾）
+        successful_legs = []
+        for execution in executions:
+            if execution.success and not execution.is_rollback:
+                successful_legs.append({
+                    'leg_index': execution.legIndex,
+                    'leg': plan.legs[execution.legIndex],
+                    'order_id': execution.orderId,
+                    'side': plan.legs[execution.legIndex].side
+                })
+        
+        if not successful_legs:
+            self.logger.info("twap_emergency_rollback_no_legs", planId=plan_id)
+            return True
+        
+        # 執行回滾
+        await self._rollback_successful_legs(plan_id, -1, successful_legs)  # -1 表示緊急回滾
+        
+        self.logger.warning("twap_emergency_rollback_completed", 
+                           planId=plan_id, 
+                           rolledBackLegsCount=len(successful_legs))
+        return True
 
     async def get_progress(self, plan_id: str) -> Optional[TwapProgress]:
         """取得 TWAP 策略計畫進度"""
@@ -406,6 +443,96 @@ class TWAPEngine:
     async def get_executions(self, plan_id: str) -> Optional[List[TwapExecution]]:
         """取得 TWAP 策略執行記錄"""
         return self.executions.get(plan_id)
+    
+    async def _rollback_successful_legs(self, plan_id: str, slice_index: int, successful_legs: List[dict]):
+        """回滾成功的腿，執行反向平倉"""
+        plan = self.plans[plan_id]
+        
+        self.logger.warning("twap_rollback_started", 
+                           planId=plan_id, 
+                           sliceIndex=slice_index,
+                           successfulLegsCount=len(successful_legs))
+        
+        for leg_info in successful_legs:
+            leg_index = leg_info['leg_index']
+            leg = leg_info['leg']
+            original_order_id = leg_info['order_id']
+            original_side = leg_info['side']
+            
+            # 計算反向操作
+            reverse_side = "Sell" if original_side == "buy" else "Buy"
+            
+            try:
+                # 執行反向平倉
+                if leg.exchange == "bybit":
+                    # 依據 leg 的 category 來決定走現貨或合約，避免用索引推斷
+                    if getattr(leg, "category", "spot") == "spot":
+                        rollback_result = self._place_spot_order(
+                            symbol=leg.symbol,
+                            quantity=str(plan.sliceQty),
+                            side=reverse_side,
+                            isLeverage=1
+                        )
+                    else:
+                        rollback_result = self._place_perp_order(
+                            symbol=leg.symbol,
+                            quantity=str(plan.sliceQty),
+                            side=reverse_side
+                        )
+                else:
+                    rollback_result = OrderResult(
+                        success=False,
+                        price=None,
+                        order_id=None,
+                        error_message=f"Unsupported exchange for rollback: {leg.exchange}"
+                    )
+                
+                # 記錄回滾結果
+                rollback_execution = TwapExecution(
+                    planId=plan_id,
+                    sliceIndex=slice_index,
+                    legIndex=leg_index,
+                    orderId=rollback_result.order_id,
+                    success=rollback_result.success,
+                    price=float(rollback_result.price) if rollback_result.price else None,
+                    qty=plan.sliceQty,
+                    error=rollback_result.error_message
+                )
+                
+                # 標記為回滾操作
+                rollback_execution.is_rollback = True
+                rollback_execution.original_order_id = original_order_id
+                
+                self.executions[plan_id].append(rollback_execution)
+                
+                if rollback_result.success:
+                    self.logger.info("twap_rollback_success", 
+                                   planId=plan_id, 
+                                   sliceIndex=slice_index,
+                                   legIndex=leg_index,
+                                   originalOrderId=original_order_id,
+                                   rollbackOrderId=rollback_result.order_id,
+                                   success=True)
+                else:
+                    self.logger.error("twap_rollback_failed", 
+                                    planId=plan_id, 
+                                    sliceIndex=slice_index,
+                                    legIndex=leg_index,
+                                    originalOrderId=original_order_id,
+                                    error=rollback_result.error_message)
+                    
+            except Exception as e:
+                self.logger.error("twap_rollback_exception", 
+                                planId=plan_id, 
+                                sliceIndex=slice_index,
+                                legIndex=leg_index,
+                                originalOrderId=original_order_id,
+                                error=str(e))
+        
+        self.logger.warning("twap_rollback_completed", 
+                           planId=plan_id, 
+                           sliceIndex=slice_index,
+                           successfulLegsCount=len(successful_legs))
 
     async def _execute_twap(self, plan_id: str):
         """執行 TWAP 策略"""
@@ -421,15 +548,16 @@ class TWAPEngine:
                 
                 # 執行每個交易腿
                 slice_failed = False
+                successful_legs = []  # 記錄成功的腿
+                
                 for leg_index, leg in enumerate(plan.legs):
                     if progress.state != TwapState.RUNNING:
                         break
                     
                     # 根據交易所類型選擇客戶端
                     if leg.exchange == "bybit":
-                        # 根據 leg 索引決定使用現貨還是合約
-                        if leg_index == 0:
-                            # 第一個 leg 使用現貨
+                        # 依據每個 leg 的 category 來決定走現貨或合約
+                        if getattr(leg, "category", "spot") == "spot":
                             order_result = self._place_spot_order(
                                 symbol=leg.symbol,
                                 quantity=str(plan.sliceQty),
@@ -437,7 +565,6 @@ class TWAPEngine:
                                 isLeverage=1
                             )
                         else:
-                            # 第二個 leg 使用永續合約
                             order_result = self._place_perp_order(
                                 symbol=leg.symbol,
                                 quantity=str(plan.sliceQty),
@@ -467,6 +594,14 @@ class TWAPEngine:
                     self.executions[plan_id].append(execution)
                     
                     if order_result.success:
+                        # 記錄成功的腿
+                        successful_legs.append({
+                            'leg_index': leg_index,
+                            'leg': leg,
+                            'order_id': order_result.order_id,
+                            'side': leg.side
+                        })
+                        
                         progress.executed += plan.sliceQty
                         progress.remaining -= plan.sliceQty
                         progress.lastExecutionTs = int(time.time() * 1000)
@@ -484,15 +619,25 @@ class TWAPEngine:
                                         legIndex=leg_index,
                                         error=order_result.error_message)
                         
+                        # 如果有成功的腿，需要執行反向平倉
+                        if successful_legs:
+                            await self._rollback_successful_legs(plan_id, slice_index, successful_legs)
+                        
                         # 下單失敗，立即終止策略
-                        progress.state = TwapState.CANCELLED
+                        # 根據錯誤類型決定狀態
+                        if "ErrCode: 10003" in order_result.error_message or "not authorized" in order_result.error_message.lower():
+                            progress.state = TwapState.FAILED  # API 授權錯誤設為 FAILED
+                        else:
+                            progress.state = TwapState.CANCELLED  # 其他錯誤設為 CANCELLED
+                        
                         progress.nextExecutionTs = None
                         slice_failed = True
                         self.logger.error("twap_plan_terminated_due_to_failure", 
                                         planId=plan_id, 
                                         sliceIndex=slice_index,
                                         legIndex=leg_index,
-                                        error=order_result.error_message)
+                                        error=order_result.error_message,
+                                        finalState=progress.state.value)
                         break  # 跳出腿的循環
                 
                 progress.slicesDone = slice_index + 1

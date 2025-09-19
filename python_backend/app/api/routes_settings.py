@@ -15,6 +15,13 @@ from ..utils.env_manager import env_manager
 router = APIRouter()
 logger = get_logger()
 
+# 僅監控 Bybit，避免不必要的外部請求
+EXCHANGES = ["bybit"]
+
+# 簡易快取，避免頻繁呼叫交易所時間端點
+_status_cache: dict[str, dict] = {}
+_status_cache_ttl_sec = 60
+
 
 ExchangeName = Literal["bybit", "binance"]
 
@@ -38,6 +45,10 @@ class AccountInfo(BaseModel):
 async def _check_exchange_status(exchange: ExchangeName) -> ExchangeStatus:
     """檢查交易所連線狀態"""
     client = await get_http_client()
+    now = time.time()
+    cached = _status_cache.get(exchange)
+    if cached and (now - cached["ts"]) < _status_cache_ttl_sec:
+        return cached["value"]
     
     if exchange == "bybit":
         try:
@@ -56,18 +67,20 @@ async def _check_exchange_status(exchange: ExchangeName) -> ExchangeStatus:
     else:
         connected = False
     
-    return ExchangeStatus(
+    result = ExchangeStatus(
         name=exchange,
         connected=connected,
         publicOnly=True  # 目前僅支援公開API
     )
+    _status_cache[exchange] = {"ts": now, "value": result}
+    return result
 
 
 @router.get("/exchanges")
 async def get_exchanges():
     """取得所有支援的交易所狀態"""
     exchanges = []
-    for exchange in ["bybit", "binance"]:
+    for exchange in EXCHANGES:
         status = await _check_exchange_status(exchange)
         exchanges.append(status)
     
@@ -76,7 +89,7 @@ async def get_exchanges():
 
 @router.get("/account/{exchange}")
 async def get_account(exchange: ExchangeName):
-    """取得指定交易所帳戶資訊（目前僅公開API，回傳模擬資料）"""
+    """取得指定交易所帳戶資訊（真實：若無私鑰則回傳空清單）"""
     # 檢查交易所連線狀態
     status = await _check_exchange_status(exchange)
     if not status.connected:
@@ -85,21 +98,33 @@ async def get_account(exchange: ExchangeName):
             detail={"code": "EXCHANGE_UNAVAILABLE", "message": f"{exchange} unavailable"}
         )
     
-    # 目前僅支援公開API，回傳模擬資料
-    # 後續階段會整合真實的帳戶API
-    mock_balances = [
-        {"asset": "USDT", "free": 1000.0},
-        {"asset": "BTC", "free": 0.0},
-        {"asset": "ETH", "free": 0.0}
-    ]
-    
-    return {
-        "success": True,
-        "data": {
-            "balances": mock_balances,
-            "positions": []
-        }
-    }
+    # 若沒有配置私鑰，返回空資產，保持真實狀態
+    exchanges_config = config.get_all_exchanges_config()
+    has_keys = False
+    if exchange in exchanges_config:
+        ex_cfg = exchanges_config[exchange]
+        has_keys = bool(ex_cfg.get("apiKey")) and bool(ex_cfg.get("secret"))
+
+    if not has_keys:
+        return {"success": True, "data": {"balances": [], "positions": []}}
+
+    try:
+        if exchange == "bybit":
+            from pybit.unified_trading import HTTP
+            session = HTTP(testnet=False, api_key=ex_cfg.get("apiKey"), api_secret=ex_cfg.get("secret"))
+            spot = session.get_wallet_balance(accountType="UNIFIED")
+            balances = []
+            if spot.get("retCode") == 0:
+                for coin in (spot.get("result", {}).get("list", [])[0].get("coin", [])):
+                    balances.append({"asset": coin.get("coin"), "free": float(coin.get("walletBalance", 0))})
+            return {"success": True, "data": {"balances": balances, "positions": []}}
+        elif exchange == "binance":
+            # 可擴展：此處暫時返回空，保持真實
+            return {"success": True, "data": {"balances": [], "positions": []}}
+        else:
+            raise HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": "unsupported exchange"})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"code": "UPSTREAM_ERROR", "message": str(e)})
 
 
 @router.get("/settings/api")

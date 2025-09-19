@@ -85,15 +85,9 @@ export const apiService = {
     }
   },
 
-  // 新增：獲取指定交易所的 symbols（若後端未返回則使用 mock）
+  // 新增：獲取指定交易所的 symbols（僅用真實資料，不使用 mock）
   getSymbols: async (exchange: string): Promise<ApiResponse<string[]>> => {
     try {
-      const useMock = (process.env.REACT_APP_USE_MOCK || '').toLowerCase() === 'true';
-      if (useMock) {
-        const mock = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'];
-        return { success: true, data: mock };
-      }
-
       const res = await api.get('/api/exchanges');
       const data = (res as unknown as ApiResponse<Record<string, ExchangeInfo>>).data;
       if (!data || !data[exchange]) {
@@ -131,24 +125,44 @@ export const apiService = {
   getBatchPrices: (symbols: string[]) => 
     api.post('/api/prices/batch', { symbols }),
   
-  // 監控交易對管理
-  getMonitoringPairs: () => api.get('/api/monitoring/pairs'),
+  // 監控交易對管理 - 統一使用套利引擎API
+  getMonitoringPairs: () => api.get('/api/arbitrage/pairs'),
   
   addMonitoringPair: (config: any) => 
-    api.post('/api/monitoring/pairs', config),
+    api.post('/api/arbitrage/pairs', config),
   
   updateMonitoringPair: (id: string, updates: any) => 
-    api.put(`/api/monitoring/pairs/${id}`, updates),
+    api.put(`/api/arbitrage/pairs/${id}`, updates),
   
   removeMonitoringPair: (id: string) => 
-    api.delete(`/api/monitoring/pairs/${id}`),
+    api.delete(`/api/arbitrage/pairs/${id}`),
 
   // 獲取監控交易對的實時價格（若後端未提供，請改用 websocket 或 batch）
   getMonitoringPrices: () => api.get('/api/monitoring/prices'),
   
+  // 套利引擎控制
+  getArbitrageEngineStatus: () => api.get('/api/arbitrage/engine/status'),
+  
+  controlArbitrageEngine: (payload: { action: 'start' | 'stop' }) => 
+    api.post('/api/arbitrage/engine/control', payload),
+  
+  // 套利監控對管理
+  upsertArbitragePair: (payload: any) => 
+    api.post('/api/arbitrage/pairs', payload),
+  
+  removeArbitragePair: (pairId: string) => 
+    api.delete(`/api/arbitrage/pairs/${pairId}`),
+
+  updateArbitragePair: (pairId: string, updates: any) =>
+    api.put(`/api/arbitrage/pairs/${pairId}`, updates),
+  
   // 套利執行
   executeArbitrage: (pairId: string) => 
     api.post(`/api/arbitrage/execute/${pairId}`),
+
+  // 取得套利執行歷史
+  getArbitrageExecutions: () =>
+    api.get('/api/arbitrage/executions'),
   
   // TWAP策略管理
   getTwapStrategies: () => api.get('/api/twap/plans'),
@@ -164,6 +178,9 @@ export const apiService = {
   
   controlTwapStrategy: (id: string, action: string) =>
     api.post(`/api/twap/${id}/control`, { action }),
+  
+  emergencyRollbackTwap: (id: string) =>
+    api.post(`/api/twap/${id}/emergency-rollback`),
   
   // 賬戶信息
   getAccount: (exchange: string) => 
@@ -232,13 +249,12 @@ export interface MonitoringPairConfig {
     side?: 'buy' | 'sell';
   };
   threshold: number;
-  amount: number;
+  amount?: number;
   enabled?: boolean;
   executionMode?: 'market' | 'threshold';
   // 新增參數
   qty?: number;
   totalAmount?: number;
-  consumedAmount?: number;
 }
 
 export interface TwapStrategyConfig {

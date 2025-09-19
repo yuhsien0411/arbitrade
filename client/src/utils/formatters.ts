@@ -25,6 +25,24 @@ export const formatAmountWithCurrency = (amount: number, currency: string = 'USD
 };
 
 /**
+ * 從交易對字串萃取 base 幣別，例如：BTCUSDT -> BTC
+ * 若無法判斷則回傳原字串
+ */
+export const getBaseCurrencyFromSymbol = (symbol: string): string => {
+  if (!symbol || typeof symbol !== 'string') return '—';
+  const s = symbol.toUpperCase();
+  // 常見 quote 幣別，按長度排序以優先匹配較長者
+  const quotes = ['USDT', 'USDC', 'BUSD', 'FDUSD', 'DAI', 'TUSD', 'USD', 'EUR', 'TRY', 'BTC', 'ETH', 'BNB'];
+  for (const q of quotes) {
+    if (s.endsWith(q)) {
+      const base = s.slice(0, s.length - q.length);
+      return base || s;
+    }
+  }
+  return s;
+};
+
+/**
  * 格式化百分比
  * @param value 數值
  * @param decimals 小數位數

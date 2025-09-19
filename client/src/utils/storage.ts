@@ -1,0 +1,54 @@
+/**
+ * 本地存儲工具
+ * 提供數據持久化功能
+ */
+
+const STORAGE_KEYS = {
+  MONITORING_PAIRS: 'arbitrage_monitoring_pairs',
+  ARBITRAGE_OPPORTUNITIES: 'arbitrage_opportunities',
+  TWAP_STRATEGIES: 'twap_strategies',
+  SYSTEM_SETTINGS: 'system_settings',
+} as const;
+
+export const storage = {
+  // 保存數據到 localStorage
+  save: <T>(key: string, data: T): void => {
+    try {
+      localStorage.setItem(key, JSON.stringify(data));
+    } catch (error) {
+      console.error('保存數據失敗:', error);
+    }
+  },
+
+  // 從 localStorage 讀取數據
+  load: <T>(key: string, defaultValue: T): T => {
+    try {
+      const item = localStorage.getItem(key);
+      return item ? JSON.parse(item) : defaultValue;
+    } catch (error) {
+      console.error('讀取數據失敗:', error);
+      return defaultValue;
+    }
+  },
+
+  // 移除數據
+  remove: (key: string): void => {
+    try {
+      localStorage.removeItem(key);
+    } catch (error) {
+      console.error('移除數據失敗:', error);
+    }
+  },
+
+  // 清空所有相關數據
+  clear: (): void => {
+    Object.values(STORAGE_KEYS).forEach(key => {
+      storage.remove(key);
+    });
+  },
+
+  // 獲取存儲鍵
+  keys: STORAGE_KEYS,
+};
+
+export default storage;

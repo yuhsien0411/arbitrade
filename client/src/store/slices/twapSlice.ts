@@ -28,7 +28,7 @@ interface TwapStrategy {
   executedOrders: number;
   remainingAmount: number;
   nextExecutionTime: number;
-  status: 'active' | 'paused' | 'completed' | 'cancelled';
+  status: 'active' | 'paused' | 'completed' | 'cancelled' | 'failed';
 }
 
 interface TwapExecution {

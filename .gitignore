@@ -53,3 +53,15 @@ Thumbs.db
 # Cursor rules (workspace-specific)
 *.cursorrules
 .cursor/rules/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/

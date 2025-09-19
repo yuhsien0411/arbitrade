@@ -10,7 +10,7 @@ import {
 } from 'antd';
 import { 
   PlusOutlined, DeleteOutlined, PlayCircleOutlined, PauseCircleOutlined,
-  SettingOutlined, ReloadOutlined, ExclamationCircleOutlined
+  SettingOutlined, ReloadOutlined, ExclamationCircleOutlined, StopOutlined
 } from '@ant-design/icons';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
@@ -31,16 +31,20 @@ const TwapPage: React.FC = () => {
   
   // 將已完成的策略轉換為執行記錄格式
   const completedStrategiesAsExecutions = strategies
-    .filter(strategy => strategy.status === 'completed')
+    .filter(strategy => strategy.status === 'completed' || strategy.status === 'cancelled' || strategy.status === 'failed')
     .map(strategy => ({
       strategyId: strategy.id,
       timestamp: strategy.createdAt,
       amount: strategy.totalAmount,
       leg1Price: null,
       leg2Price: null,
-      success: true,
-      orderId: `completed_${strategy.id}`,
-      legIndex: 0
+      success: strategy.status === 'completed',
+      orderId: `${strategy.status}_${strategy.id}`,
+      legIndex: 0,
+      status: strategy.status,
+      executionType: strategy.status === 'completed' ? '完成' : 
+                    strategy.status === 'cancelled' ? '取消' : 
+                    strategy.status === 'failed' ? '失敗' : '未知'
     }));
   
   // 合併原始執行記錄和已完成的策略
@@ -89,7 +93,8 @@ const TwapPage: React.FC = () => {
           status: plan.state === 'running' ? 'active' as const : 
                  plan.state === 'paused' ? 'paused' as const :
                  plan.state === 'completed' ? 'completed' as const :
-                 plan.state === 'cancelled' ? 'cancelled' as const : 'active' as const
+                 plan.state === 'cancelled' ? 'cancelled' as const :
+                 plan.state === 'failed' ? 'failed' as const : 'active' as const
         }));
         
         // 一次性設置所有策略
@@ -103,6 +108,13 @@ const TwapPage: React.FC = () => {
   // 載入TWAP策略
   useEffect(() => {
     loadTwapStrategies();
+    
+    // 設置定時重新載入策略（每60秒）
+    const reloadInterval = setInterval(() => {
+      loadTwapStrategies();
+    }, 60 * 1000);
+    
+    return () => clearInterval(reloadInterval);
   }, [loadTwapStrategies]);
 
   // 添加/更新TWAP策略（後端僅需單腿：symbol/side/totalAmount/timeInterval/orderCount）
@@ -121,13 +133,15 @@ const TwapPage: React.FC = () => {
             exchange: values.leg1_exchange || "bybit",
             symbol: values.leg1_symbol,
             side: values.leg1_side,
-            type: "market"  // 現貨交易
+            type: "market",
+            category: values.leg1_type === 'future' ? 'linear' : 'spot'
           },
           {
             exchange: values.leg2_exchange || "bybit",
             symbol: values.leg2_symbol,
             side: values.leg2_side,
-            type: "market"  // 合約交易
+            type: "market",
+            category: values.leg2_type === 'future' ? 'linear' : 'spot'
           }
         ]
       };
@@ -148,13 +162,13 @@ const TwapPage: React.FC = () => {
           leg1: {
             exchange: payload.legs[0].exchange,
             symbol: payload.legs[0].symbol,
-            type: payload.legs[0].type as 'spot' | 'future',
+            type: (payload.legs[0].category === 'linear' ? 'future' : 'spot') as 'spot' | 'future',
             side: payload.legs[0].side as 'buy' | 'sell'
           },
           leg2: {
             exchange: payload.legs[1].exchange,
             symbol: payload.legs[1].symbol,
-            type: 'future' as const,
+            type: (payload.legs[1].category === 'linear' ? 'future' : 'spot') as 'spot' | 'future',
             side: payload.legs[1].side as 'buy' | 'sell'
           },
           totalAmount: payload.totalQty,
@@ -247,11 +261,11 @@ const TwapPage: React.FC = () => {
   // 暫停/恢復策略
   const handleTogglePause = async (strategy: any) => {
     try {
-      const action = strategy.status === 'running' ? 'pause' : 'resume';
+      const action = (strategy.status === 'running' || strategy.status === 'active') ? 'pause' : 'resume';
       const response = await apiService.controlTwapStrategy(strategy.id, action) as unknown as ApiResponse;
       
       if (response.success) {
-        if (strategy.status === 'running') {
+        if (strategy.status === 'running' || strategy.status === 'active') {
           dispatch(pauseStrategy(strategy.id));
           message.success('策略已暫停');
         } else if (strategy.status === 'paused') {
@@ -287,6 +301,31 @@ const TwapPage: React.FC = () => {
           }
         } catch (error: any) {
           message.error(error.message || '取消失敗');
+        }
+      },
+    });
+  };
+
+  // 緊急回滾
+  const handleEmergencyRollback = (id: string) => {
+    confirm({
+      title: '緊急回滾',
+      content: '確定要執行緊急回滾嗎？這將對所有成功的腿執行反向平倉操作，無法撤銷。',
+      icon: <StopOutlined style={{ color: '#ff4d4f' }} />,
+      okText: '確認回滾',
+      okType: 'danger',
+      onOk: async () => {
+        try {
+          const response = await apiService.emergencyRollbackTwap(id) as unknown as ApiResponse;
+          if (response.success) {
+            message.success('緊急回滾已執行');
+            // 重新載入策略列表
+            loadTwapStrategies();
+          } else {
+            message.error(response.message || '緊急回滾失敗');
+          }
+        } catch (error: any) {
+          message.error(error.message || '緊急回滾失敗');
         }
       },
     });
@@ -435,6 +474,7 @@ const TwapPage: React.FC = () => {
           paused: { color: 'warning', text: '已暫停' },
           completed: { color: 'success', text: '已完成' },
           cancelled: { color: 'error', text: '已取消' },
+          failed: { color: 'error', text: '執行失敗' },
         };
         
         const status = statusMap[record.status] || { color: 'default', text: '未知' };
@@ -500,12 +540,35 @@ const TwapPage: React.FC = () => {
             </Tooltip>
           )}
           
+          {(record.status === 'running' || record.status === 'paused' || record.status === 'active') && (
+            <Tooltip title="緊急回滾">
+              <Button
+                size="small"
+                danger
+                icon={<StopOutlined />}
+                onClick={() => handleEmergencyRollback(record.id)}
+                style={{ backgroundColor: '#ff4d4f', borderColor: '#ff4d4f' }}
+              />
+            </Tooltip>
+          )}
+          
+          {record.status === 'failed' && (
+            <Tooltip title="重新啟動">
+              <Button
+                size="small"
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                onClick={() => handleStart(record)}
+              />
+            </Tooltip>
+          )}
+          
           <Tooltip title="編輯">
             <Button
               size="small"
               icon={<SettingOutlined />}
               onClick={() => handleEdit(record)}
-              disabled={record.status === 'completed' || record.status === 'cancelled'}
+              disabled={record.status === 'completed' || record.status === 'cancelled' || record.status === 'failed'}
             />
           </Tooltip>
           
@@ -539,12 +602,27 @@ const TwapPage: React.FC = () => {
       title: '執行類型',
       key: 'type',
       render: (record: any) => {
-        const isCompleted = record.orderId?.startsWith('completed_');
-        return (
-          <Tag color={isCompleted ? 'green' : 'blue'}>
-            {isCompleted ? '策略完成' : '雙腿執行'}
-          </Tag>
-        );
+        if (record.executionType) {
+          // 策略級別的執行類型
+          const colorMap: Record<string, string> = {
+            '完成': 'success',
+            '取消': 'warning', 
+            '失敗': 'error'
+          };
+          return (
+            <Tag color={colorMap[record.executionType] || 'default'}>
+              {record.executionType}
+            </Tag>
+          );
+        } else {
+          // 腿級別的執行類型
+          const isCompleted = record.orderId?.startsWith('completed_');
+          return (
+            <Tag color={isCompleted ? 'green' : 'blue'}>
+              {isCompleted ? '策略完成' : '雙腿執行'}
+            </Tag>
+          );
+        }
       },
     },
     {
@@ -565,13 +643,20 @@ const TwapPage: React.FC = () => {
       render: (record: any) => {
         const isCompleted = record.orderId?.startsWith('completed_');
         if (isCompleted) {
+          // 依方向著色：買入=綠色、賣出=紅色
+          const strategy = strategies.find(s => s.id === record.strategyId);
+          const leg1Side = strategy?.leg1?.side || 'buy';
+          const leg2Side = strategy?.leg2?.side || 'sell';
+          const leg1Type = strategy?.leg1?.type || 'spot';
+          const leg2Type = strategy?.leg2?.type || 'future';
+          const colorForSide = (side: string) => (side === 'buy' ? '#52c41a' : '#ff4d4f');
           return (
             <Space direction="vertical" size="small">
-              <Text style={{ fontSize: '12px', color: '#52c41a' }}>
-                Leg1: 現貨市價
+              <Text style={{ fontSize: '12px', color: colorForSide(leg1Side) }}>
+                Leg1: {leg1Type === 'future' ? '合約市價' : '現貨市價'}
               </Text>
-              <Text style={{ fontSize: '12px', color: '#52c41a' }}>
-                Leg2: 合約市價
+              <Text style={{ fontSize: '12px', color: colorForSide(leg2Side) }}>
+                Leg2: {leg2Type === 'future' ? '合約市價' : '現貨市價'}
               </Text>
             </Space>
           );
@@ -591,11 +676,28 @@ const TwapPage: React.FC = () => {
     {
       title: '狀態',
       key: 'success',
-      render: (record: any) => (
-        <Tag color={record.success ? 'success' : 'error'}>
-          {record.success ? '成功' : '失敗'}
-        </Tag>
-      ),
+      render: (record: any) => {
+        if (record.executionType) {
+          // 策略級別的狀態
+          const colorMap: Record<string, string> = {
+            '完成': 'success',
+            '取消': 'warning',
+            '失敗': 'error'
+          };
+          return (
+            <Tag color={colorMap[record.executionType] || 'default'}>
+              {record.executionType}
+            </Tag>
+          );
+        } else {
+          // 腿級別的狀態
+          return (
+            <Tag color={record.success ? 'success' : 'error'}>
+              {record.success ? '成功' : '失敗'}
+            </Tag>
+          );
+        }
+      },
     },
   ];
 
@@ -861,10 +963,10 @@ const TwapPage: React.FC = () => {
                 extra="每次執行的下單數量"
               >
                 <InputNumber
-                  min={0.01}
-                  step={0.01}
+                  min={0.0001}
+                  step={0.0001}
                   style={{ width: '100%' }}
-                  placeholder="0.01"
+                  placeholder="0.001"
                   addonAfter="幣"
                 />
               </Form.Item>

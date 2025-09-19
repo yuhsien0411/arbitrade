@@ -59,6 +59,7 @@ async def get_twap_status(plan_id: str):
 async def control_twap_plan(plan_id: str, request: TwapControlRequest):
     """控制 TWAP 計畫（開始/暫停/恢復/取消）"""
     try:
+        logger.info("twap_control_request", planId=plan_id, action=request.action)
         success = False
         new_state = None
         
@@ -68,6 +69,7 @@ async def control_twap_plan(plan_id: str, request: TwapControlRequest):
         elif request.action == "pause":
             success = await twap_engine.pause_plan(plan_id)
             new_state = "paused" if success else None
+            logger.info("twap_pause_attempt", planId=plan_id, success=success)
         elif request.action == "resume":
             success = await twap_engine.resume_plan(plan_id)
             new_state = "running" if success else None
@@ -192,6 +194,37 @@ async def update_twap_plan(plan_id: str, request: CreateTwapRequest):
         raise HTTPException(
             status_code=500,
             detail={"code": "INTERNAL_ERROR", "message": f"Failed to update TWAP plan: {str(e)}"}
+        )
+
+
+@router.post("/twap/{plan_id}/emergency-rollback")
+async def emergency_rollback(plan_id: str):
+    """緊急回滾 TWAP 計畫的所有成功腿"""
+    try:
+        if plan_id not in twap_engine.plans:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "NOT_FOUND", "message": "TWAP plan not found"}
+            )
+        
+        success = await twap_engine.emergency_rollback(plan_id)
+        
+        if success:
+            logger.info("twap_emergency_rollback_success", planId=plan_id)
+            return {"success": True, "message": "Emergency rollback completed"}
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "INTERNAL_ERROR", "message": "Emergency rollback failed"}
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("twap_emergency_rollback_failed", planId=plan_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": f"Emergency rollback failed: {str(e)}"}
         )
 
 

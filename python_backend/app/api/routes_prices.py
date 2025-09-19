@@ -25,8 +25,10 @@ class BatchRequest(BaseModel):
     items: List[BatchItem] = Field(default_factory=list)
 
 
-async def _fetch_orderbook(exchange: ExchangeName, symbol: str) -> Dict[str, Any]:
-    cache_key = f"orderbook:{exchange}:{symbol}"
+async def _fetch_orderbook(exchange: ExchangeName, symbol: str, category: str = None) -> Dict[str, Any]:
+    # 如果有指定category，優先使用指定的category
+    categories = [category] if category else ["spot", "linear"]
+    cache_key = f"orderbook:{exchange}:{symbol}:{category or 'auto'}"
     cached = await cache.get(cache_key)
     if cached is not None:
         return cached
@@ -35,8 +37,8 @@ async def _fetch_orderbook(exchange: ExchangeName, symbol: str) -> Dict[str, Any
     if exchange == "bybit":
         # 先用 tickers 取 bid1/ask1，失敗再回退 orderbook
         payload = None
-        for category in ("spot", "linear"):
-            tickers_url = f"https://api.bybit.com/v5/market/tickers?category={category}&symbol={symbol}"
+        for cat in categories:
+            tickers_url = f"https://api.bybit.com/v5/market/tickers?category={cat}&symbol={symbol}"
             r = await client.get(tickers_url)
             if r.status_code == 200:
                 data = r.json()
@@ -59,7 +61,7 @@ async def _fetch_orderbook(exchange: ExchangeName, symbol: str) -> Dict[str, Any
                             }
                             break
             # 回退到 orderbook depth=1
-            ob_url = f"https://api.bybit.com/v5/market/orderbook?category={category}&symbol={symbol}&limit=1"
+            ob_url = f"https://api.bybit.com/v5/market/orderbook?category={cat}&symbol={symbol}&limit=1"
             r = await client.get(ob_url)
             if r.status_code == 200:
                 data = r.json()
@@ -104,8 +106,8 @@ async def _fetch_orderbook(exchange: ExchangeName, symbol: str) -> Dict[str, Any
 
 
 @router.get("/prices/{exchange}/{symbol}")
-async def get_price(exchange: ExchangeName, symbol: str):
-    data = await _fetch_orderbook(exchange, symbol)
+async def get_price(exchange: ExchangeName, symbol: str, category: str = None):
+    data = await _fetch_orderbook(exchange, symbol, category)
     return {"success": True, "data": data}
 
 
