@@ -100,7 +100,52 @@
 ## 部署說明
 - **開發環境**：支援本地開發和測試
 - **生產環境**：可部署至雲端服務器
+- **AWS EC2 部署**：一鍵部署到 AWS EC2 實例
+- **Docker 容器化**：使用 Docker 確保環境一致性
+- **Nginx 反向代理**：提供 HTTPS 和負載均衡
 - **監控告警**：集成系統監控和告警機制
+
+### 🚀 AWS EC2 快速部署
+
+#### 一鍵部署
+```bash
+# 1. 連接到 EC2 實例
+ssh -i your-key.pem ubuntu@your-ec2-ip
+
+# 2. 上傳項目文件
+scp -i your-key.pem -r . ubuntu@your-ec2-ip:/home/ubuntu/arbitrade/
+
+# 3. 執行自動部署
+cd arbitrade
+chmod +x deploy.sh
+./deploy.sh
+
+# 4. 配置 API 密鑰
+sudo nano /opt/arbitrade/.env
+# 添加您的 Bybit API 密鑰
+
+# 5. 重啟應用
+sudo systemctl restart arbitrade
+```
+
+#### 訪問應用
+- **HTTP**: `http://your-ec2-ip`
+- **HTTPS**: `https://your-ec2-ip`
+
+#### 管理命令
+```bash
+# 啟動/停止/重啟
+sudo systemctl start/stop/restart arbitrade
+
+# 查看日誌
+/opt/arbitrade/logs.sh
+
+# 查看狀態
+sudo systemctl status arbitrade
+```
+
+📖 **詳細部署指南**：請參考 [AWS_DEPLOYMENT_GUIDE.md](./AWS_DEPLOYMENT_GUIDE.md)
+📋 **部署檢查清單**：請參考 [DEPLOYMENT_CHECKLIST.md](./DEPLOYMENT_CHECKLIST.md)
 
 ## 使用指南
 
