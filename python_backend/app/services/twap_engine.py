@@ -52,6 +52,19 @@ class TWAPEngine:
         # 初始化 Bybit 客戶端
         self._init_clients()
     
+    def clear_all_data(self) -> None:
+        """清空所有 TWAP 引擎資料"""
+        # 停止所有運行中的任務
+        for task in self._running_tasks.values():
+            if not task.done():
+                task.cancel()
+        
+        self.plans.clear()
+        self.progress.clear()
+        self.executions.clear()
+        self._running_tasks.clear()
+        self.logger.info("twap_engine_data_cleared", success=True)
+
     def _init_clients(self):
         """初始化交易所客戶端"""
         try:

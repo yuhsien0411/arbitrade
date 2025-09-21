@@ -18,6 +18,7 @@ import { apiService, ApiResponse } from '../services/api';
 import { addStrategy, updateStrategy, removeStrategy, setStrategies, pauseStrategy, resumeStrategy, cancelStrategy } from '../store/slices/twapSlice';
 import { formatAmountWithCurrency } from '../utils/formatters';
 import logger from '../utils/logger';
+import DebounceService from '../services/debounceService';
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -60,6 +61,61 @@ const TwapPage: React.FC = () => {
   const availableExchanges = Object.entries(exchanges)
     .filter(([_, exchange]) => exchange.connected)
     .map(([key, exchange]) => ({ key, name: exchange.name, symbols: exchange.symbols }));
+    
+  // 常用交易對列表
+  const commonSymbols = [
+    'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'SOLUSDT', 'DOGEUSDT',
+    'DOTUSDT', 'MATICUSDT', 'LTCUSDT', 'AVAXUSDT', 'LINKUSDT', 'UNIUSDT', 'ATOMUSDT',
+    'ETCUSDT', 'FILUSDT', 'XLMUSDT', 'TRXUSDT', 'NEARUSDT', 'AAVEUSDT'
+  ];
+  
+  // 從交易所獲取可用交易對
+  const [availableSymbols, setAvailableSymbols] = useState<string[]>(commonSymbols);
+  const [symbolsLoaded, setSymbolsLoaded] = useState(false);
+  
+  // 載入交易所支持的交易對
+  useEffect(() => {
+    const loadSymbols = async () => {
+      // 避免重複載入
+      if (symbolsLoaded) return;
+      
+      try {
+        // 獲取第一個連接的交易所
+        const connectedExchange = availableExchanges[0]?.key;
+        if (connectedExchange) {
+          const response = await apiService.getSymbols(connectedExchange) as unknown as ApiResponse;
+          if (response.success && Array.isArray(response.data)) {
+            // 合併常用交易對和交易所支持的交易對
+            const symbolSet = new Set([...commonSymbols, ...response.data]);
+            const allSymbols = Array.from(symbolSet);
+            setAvailableSymbols(allSymbols);
+            setSymbolsLoaded(true);
+            logger.info('已載入交易對列表', { count: allSymbols.length }, 'TwapPage');
+          }
+        }
+      } catch (error) {
+        logger.error('載入交易對列表失敗', error, 'TwapPage');
+        setSymbolsLoaded(true); // 即使失敗也標記為已載入，避免重複嘗試
+      }
+    };
+    
+    // 只在有連接的交易所且未載入時才載入
+    if (availableExchanges.length > 0 && !symbolsLoaded) {
+      // 使用防抖服務，1秒延遲，最多每分鐘10次請求
+      const debouncedLoadSymbols = DebounceService.debounce(
+        'load-symbols',
+        loadSymbols,
+        { delay: 1000, maxCalls: 10, timeWindow: 60000 }
+      );
+      
+      debouncedLoadSymbols();
+    }
+    
+    // 清理函數
+    return () => {
+      DebounceService.cancel('load-symbols');
+    };
+  }, [availableExchanges.length, symbolsLoaded]); // 依賴交易所數量和載入狀態
 
   const loadTwapStrategies = useCallback(async () => {
     try {
@@ -653,10 +709,10 @@ const TwapPage: React.FC = () => {
           return (
             <Space direction="vertical" size="small">
               <Text style={{ fontSize: '12px', color: colorForSide(leg1Side) }}>
-                Leg1: {leg1Type === 'future' ? '合約市價' : '現貨市價'}
+                Leg1: {leg1Type === 'future' ? '合約市價' : '現貨市價'} ({leg1Side === 'buy' ? '買入' : '賣出'})
               </Text>
               <Text style={{ fontSize: '12px', color: colorForSide(leg2Side) }}>
-                Leg2: {leg2Type === 'future' ? '合約市價' : '現貨市價'}
+                Leg2: {leg2Type === 'future' ? '合約市價' : '現貨市價'} ({leg2Side === 'buy' ? '買入' : '賣出'})
               </Text>
             </Space>
           );
@@ -789,13 +845,20 @@ const TwapPage: React.FC = () => {
         footer={null}
         width={600}
       >
+        <Alert
+          message="TWAP 策略配置說明"
+          description="建議配置為現貨+合約組合：Leg 1 選擇現貨，Leg 2 選擇合約，這樣可以實現現貨與合約之間的價差套利。"
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
         <Form
           form={form}
           layout="vertical"
           onFinish={handleSubmit}
           initialValues={{
             leg1_exchange: 'bybit',
-            leg1_type: 'future',
+            leg1_type: 'spot',
             leg1_side: 'buy',
             leg1_symbol: 'BTCUSDT',
             leg2_exchange: 'bybit',
@@ -810,7 +873,7 @@ const TwapPage: React.FC = () => {
         >
           <Row gutter={16}>
             <Col span={12}>
-              <Card title="Leg 1 配置" size="small">
+              <Card title="Leg 1 配置 (建議：現貨)" size="small">
                 <Form.Item
                   name="leg1_exchange"
                   label="交易所"
@@ -842,26 +905,41 @@ const TwapPage: React.FC = () => {
                   rules={[
                     { required: true, message: '請輸入交易對' },
                     { 
-                      pattern: /^[A-Z0-9]+USDT?$/i, 
+                      pattern: /^[A-Z0-9]+[A-Z0-9]*$/i, 
                       message: '請輸入正確的交易對格式，如：BTCUSDT' 
                     }
                   ]}
                   extra="請輸入交易對符號，如：BTCUSDT, ETHUSDT 等"
                 >
                   <Select 
-                    placeholder="選擇交易對"
+                    placeholder="選擇或輸入交易對"
                     defaultValue="BTCUSDT"
                     showSearch
+                    allowClear
+                    mode="tags" // 允許自定義輸入
+                    tokenSeparators={[',']} // 允許使用逗號分隔
+                    maxTagCount={1} // 只顯示一個標籤
                     filterOption={(input, option) => {
                       if (!option?.children) return false;
                       const children = String(option.children);
                       return children.toLowerCase().includes(input.toLowerCase());
                     }}
+                    onChange={(value) => {
+                      // 確保只有一個值
+                      if (Array.isArray(value) && value.length > 0) {
+                        const symbol = value[value.length - 1].toUpperCase(); // 轉為大寫
+                        form.setFieldsValue({ leg1_symbol: symbol });
+                        
+                        // 同步更新 leg2 的交易對，保持一致
+                        if (form.getFieldValue('leg2_symbol') === form.getFieldValue('leg1_symbol')) {
+                          form.setFieldsValue({ leg2_symbol: symbol });
+                        }
+                      }
+                    }}
                   >
-                    <Option value="BTCUSDT">BTCUSDT</Option>
-                    <Option value="ETHUSDT">ETHUSDT</Option>
-                    <Option value="ADAUSDT">ADAUSDT</Option>
-                    <Option value="SOLUSDT">SOLUSDT</Option>
+                    {availableSymbols.map(symbol => (
+                      <Option key={`leg1_${symbol}`} value={symbol}>{symbol}</Option>
+                    ))}
                   </Select>
                 </Form.Item>
 
@@ -879,7 +957,7 @@ const TwapPage: React.FC = () => {
             </Col>
 
             <Col span={12}>
-              <Card title="Leg 2 配置" size="small">
+              <Card title="Leg 2 配置 (建議：合約)" size="small">
                 <Form.Item
                   name="leg2_exchange"
                   label="交易所"
@@ -911,26 +989,36 @@ const TwapPage: React.FC = () => {
                   rules={[
                     { required: true, message: '請輸入交易對' },
                     { 
-                      pattern: /^[A-Z0-9]+USDT?$/i, 
+                      pattern: /^[A-Z0-9]+[A-Z0-9]*$/i, 
                       message: '請輸入正確的交易對格式，如：BTCUSDT' 
                     }
                   ]}
                   extra="請輸入交易對符號，如：BTCUSDT, ETHUSDT 等"
                 >
                   <Select 
-                    placeholder="選擇交易對"
+                    placeholder="選擇或輸入交易對"
                     defaultValue="BTCUSDT"
                     showSearch
+                    allowClear
+                    mode="tags" // 允許自定義輸入
+                    tokenSeparators={[',']} // 允許使用逗號分隔
+                    maxTagCount={1} // 只顯示一個標籤
                     filterOption={(input, option) => {
                       if (!option?.children) return false;
                       const children = String(option.children);
                       return children.toLowerCase().includes(input.toLowerCase());
                     }}
+                    onChange={(value) => {
+                      // 確保只有一個值
+                      if (Array.isArray(value) && value.length > 0) {
+                        const symbol = value[value.length - 1].toUpperCase(); // 轉為大寫
+                        form.setFieldsValue({ leg2_symbol: symbol });
+                      }
+                    }}
                   >
-                    <Option value="BTCUSDT">BTCUSDT</Option>
-                    <Option value="ETHUSDT">ETHUSDT</Option>
-                    <Option value="ADAUSDT">ADAUSDT</Option>
-                    <Option value="SOLUSDT">SOLUSDT</Option>
+                    {availableSymbols.map(symbol => (
+                      <Option key={`leg2_${symbol}`} value={symbol}>{symbol}</Option>
+                    ))}
                   </Select>
                 </Form.Item>
 

@@ -31,6 +31,7 @@ class PairConfig:
     leg2: Leg
     threshold: float  # 百分比門檻，例如 0.02 代表 0.02%
     qty: float
+    totalAmount: float  # 總金額 = qty * max_execs
     enabled: bool = True
     max_execs: int = 1  # 每次配置允許觸發的最大次數
 
@@ -79,6 +80,14 @@ class ArbitrageEngine:
             self._task = None
         self.logger.info("arb_engine_stopped", success=True)
         return True
+
+    def clear_all_data(self) -> None:
+        """清空所有套利引擎資料"""
+        self._pairs.clear()
+        self._executions_count.clear()
+        self._executing_pairs.clear()
+        self._executions_history.clear()
+        self.logger.info("arb_engine_data_cleared", success=True)
 
     def upsert_pair(self, pair_id: str, config: PairConfig) -> None:
         self._pairs[pair_id] = config
@@ -285,14 +294,11 @@ class ArbitrageEngine:
                 except Exception:
                     pass
 
-                # 支援正負閾值：
-                # - threshold > 0 → 需 spread_pct >= threshold 才觸發
-                # - threshold < 0 → 需 spread_pct <= threshold 才觸發（負向套利）
-                # 觸發邏輯
-                if cfg.threshold > 0:
-                    should_trigger = (spread_pct >= cfg.threshold)
-                else:
-                    should_trigger = (spread_pct <= cfg.threshold)
+                # 觸發邏輯：統一使用 spread >= threshold
+                # - threshold = 0.0 → 任何正價差都會觸發
+                # - threshold > 0 → 價差 >= 閾值時觸發
+                # - threshold < 0 → 價差 >= 負閾值時觸發（負向套利）
+                should_trigger = (spread_pct >= cfg.threshold)
                 # 執行次數與冷卻/鎖檢查
                 if self._executions_count.get(pair_id, 0) >= getattr(cfg, "max_execs", 1):
                     should_trigger = False
@@ -426,17 +432,28 @@ class ArbitrageEngine:
     def get_executions_history(self) -> Dict[str, list]:
         return self._executions_history
 
-    async def _place_order(self, leg: Leg, qty: float) -> 'OrderResult':
+    async def _place_order(self, leg: Leg, qty: float):
         """下單（現貨或合約）"""
         try:
             from .twap_engine import OrderResult
             from pybit.unified_trading import HTTP
 
+            # 檢查 API 密鑰是否配置
+            if not config.BYBIT_API_KEY or not config.BYBIT_SECRET:
+                self.logger.warning("arb_api_keys_not_configured", 
+                                 message="Bybit API 密鑰未配置，無法執行實際交易")
+                return OrderResult(
+                    success=False,
+                    price=None,
+                    order_id=None,
+                    error_message="API 密鑰未配置"
+                )
+
             # 與 TWAP 引擎對齊：使用主網設定，避免雙腿落在不同網路
             client = HTTP(
                 testnet=False,
-                api_key=config.BYBIT_API_KEY or "",
-                api_secret=config.BYBIT_SECRET or "",
+                api_key=config.BYBIT_API_KEY,
+                api_secret=config.BYBIT_SECRET,
             )
 
             side = "Buy" if leg.side == "buy" else "Sell"
@@ -478,7 +495,7 @@ class ArbitrageEngine:
         """回滾訂單（執行反向操作）"""
         try:
             # 反向操作
-            reverse_side = "Sell" if leg.side == "buy" else "Buy"
+            reverse_side = "sell" if leg.side == "buy" else "buy"
             reverse_leg = Leg(
                 exchange=leg.exchange,
                 symbol=leg.symbol,

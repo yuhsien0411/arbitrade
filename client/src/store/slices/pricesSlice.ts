@@ -98,6 +98,14 @@ const pricesSlice = createSlice({
       }
     },
     
+    // 清空所有價格資料
+    clearAllPricesData: (state) => {
+      state.currentPrices = {};
+      state.priceHistory = {};
+      state.subscriptions = [];
+      state.lastUpdateTime = 0;
+    },
+    
     clearAllPrices: (state) => {
       state.currentPrices = {};
       state.priceHistory = {};
@@ -129,6 +137,7 @@ export const {
   unsubscribe,
   clearPriceHistory,
   clearAllPrices,
+  clearAllPricesData,
 } = pricesSlice.actions;
 
 export default pricesSlice.reducer;

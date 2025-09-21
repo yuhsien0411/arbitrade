@@ -66,7 +66,7 @@ const Dashboard: React.FC = () => {
       if (location.pathname === '/') {
         loadDashboardData();
       }
-    }, 60000); // 60秒刷新一次
+    }, 10000); // 10秒刷新一次，減少頻率
     return () => clearInterval(interval);
   }, [loadDashboardData, location.pathname]);
 

@@ -15,11 +15,17 @@ logger = get_logger()
 # 記憶體儲存（後續可改為資料庫）
 monitoring_pairs: Dict[str, Dict[str, Any]] = {}
 
+def clear_monitoring_data() -> None:
+    """清空監控對資料"""
+    monitoring_pairs.clear()
+    logger.info("monitoring_data_cleared", success=True)
+
 
 class Leg(BaseModel):
     exchange: Literal["bybit", "binance"]
     symbol: str
     type: Literal["spot", "linear", "futures"]
+    side: Literal["buy", "sell"]
 
 
 class PairConfig(BaseModel):

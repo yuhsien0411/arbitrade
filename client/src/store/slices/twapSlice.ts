@@ -146,6 +146,13 @@ const twapSlice = createSlice({
       state.executions = [];
     },
     
+    // 清空所有 TWAP 資料
+    clearAllTwapData: (state) => {
+      state.strategies = [];
+      state.executions = [];
+      state.isAutoExecuteEnabled = false;
+    },
+    
     // 批量更新策略執行時間
     updateExecutionTimes: (state, action: PayloadAction<Array<{ id: string; nextExecutionTime: number }>>) => {
       action.payload.forEach(update => {
@@ -169,6 +176,7 @@ export const {
   cancelStrategy,
   setAutoExecute,
   clearExecutions,
+  clearAllTwapData,
   updateExecutionTimes,
 } = twapSlice.actions;
 

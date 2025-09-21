@@ -149,7 +149,7 @@ const ArbitragePage: React.FC = () => {
               side: pair.leg2?.side || 'sell',
               type: pair.leg2?.type || 'linear'
             },
-            threshold: pair.threshold || 0.1,
+            threshold: pair.threshold ?? 0.1,
             qty: pair.qty || 0.001,
             amount: pair.qty || 0.001,
             enabled: pair.enabled !== false,
@@ -268,12 +268,12 @@ const ArbitragePage: React.FC = () => {
       })();
     }
     
-    // 設置定時重新載入監控交易對（縮短為每30秒，初期確保即時同步）
+    // 設置定時重新載入監控交易對（調整為每5秒，提高刷新頻率）
     const reloadInterval = setInterval(() => {
       if (isConnected) {
         loadMonitoringPairs();
       }
-    }, 30 * 1000);
+    }, 5 * 1000);
     
     // 簡化價格獲取邏輯，主要依賴WebSocket推送
     const fetchTickerData = async () => {
@@ -358,8 +358,8 @@ const ArbitragePage: React.FC = () => {
                     },
                     spread,
                     spreadPercent,
-                    threshold: pair.threshold || 0.1,
-                    shouldTrigger: Math.abs(spreadPercent) >= (pair.threshold || 0.1),
+                    threshold: pair.threshold ?? 0.1,
+                    shouldTrigger: Math.abs(spreadPercent) >= (pair.threshold ?? 0.1),
                     timestamp: Date.now(),
                     direction: (leg1Side === 'sell' && leg2Side === 'buy') ? 'leg1_sell_leg2_buy' as 'leg1_buy_leg2_sell' | 'leg1_sell_leg2_buy' : 'leg1_buy_leg2_sell' as 'leg1_buy_leg2_sell' | 'leg1_sell_leg2_buy'
                   };
@@ -429,13 +429,13 @@ const ArbitragePage: React.FC = () => {
     }
     fetchExecutions();
 
-    // 定期獲取價格數據（只有在有交易對時才輪詢，間隔保持1秒）
+    // 定期獲取價格數據（只有在有交易對時才輪詢，間隔調整為5秒）
     const priceInterval = setInterval(() => {
       const pairs = monitoringPairsRef.current || [];
       if (pairs.length > 0 && isConnected) {
         fetchTickerData();
       }
-    }, 1000); // 改為 1 秒，避免過於頻繁
+    }, 5 * 1000); // 調整為 5 秒，與頁面刷新頻率一致
 
     // 清理定時器
     return () => {
@@ -460,6 +460,10 @@ const ArbitragePage: React.FC = () => {
       };
       
       // 構建符合後端API的請求格式
+      const qty = Number(values.qty || values.sliceQty || 0.01);
+      const maxExecs = Number(values.orderCount || 1);
+      const totalAmount = qty * maxExecs;
+      
       const arbitrageConfig = {
         pairId: pairId,
         leg1: {
@@ -474,10 +478,11 @@ const ArbitragePage: React.FC = () => {
           type: (values.leg2_type === 'future' ? 'linear' : values.leg2_type) || 'spot',
           side: values.leg2_side || 'sell',
         },
-        threshold: Number(values.threshold || 0.1),
-        qty: Number(values.qty || values.sliceQty || 0.01),
+        threshold: Number(values.threshold ?? 0.1),
+        qty: qty,
+        totalAmount: totalAmount,
         enabled: values.enabled ?? true,
-        maxExecs: Number(values.orderCount || 1)
+        maxExecs: maxExecs
       };
 
       // 同時構建前端顯示用的配置
@@ -503,6 +508,7 @@ const ArbitragePage: React.FC = () => {
           enabled: arbitrageConfig.enabled,
           threshold: arbitrageConfig.threshold,
           qty: arbitrageConfig.qty,
+          totalAmount: arbitrageConfig.totalAmount,
           maxExecs: arbitrageConfig.maxExecs
         };
         response = await apiService.updateArbitragePair(editingPair.id, updateData);
@@ -590,7 +596,7 @@ const ArbitragePage: React.FC = () => {
       leg2_symbol: pair.leg2?.symbol || 'BTCUSDT',
       leg2_type: pair.leg2?.type || 'spot',
       leg2_side: pair.leg2?.side || 'sell',
-      threshold: pair.threshold || 0.1,
+                    threshold: pair.threshold ?? 0.1,
       amount: pair.amount || 0,
       enabled: pair.enabled ?? true,
       executionMode: pair.executionMode || 'threshold',
@@ -1133,8 +1139,8 @@ const ArbitragePage: React.FC = () => {
                                   },
                                   spread,
                                   spreadPercent,
-                                  threshold: pair.threshold || 0.1,
-                                  shouldTrigger: Math.abs(spreadPercent) >= (pair.threshold || 0.1),
+                                  threshold: pair.threshold ?? 0.1,
+                                  shouldTrigger: Math.abs(spreadPercent) >= (pair.threshold ?? 0.1),
                                   timestamp: Date.now(),
                                   direction: (leg1Side === 'sell' && leg2Side === 'buy') ? 'leg1_sell_leg2_buy' as 'leg1_buy_leg2_sell' | 'leg1_sell_leg2_buy' : 'leg1_buy_leg2_sell' as 'leg1_buy_leg2_sell' | 'leg1_sell_leg2_buy'
                                 };
@@ -1425,7 +1431,7 @@ const ArbitragePage: React.FC = () => {
           onFinish={handleSubmit}
           initialValues={{
             enabled: true,
-            threshold: 0.1,
+            threshold: 0.0,
             amount: 100.0, // 舊參數保留
             qty: 0.01,
             totalAmount: 1000,

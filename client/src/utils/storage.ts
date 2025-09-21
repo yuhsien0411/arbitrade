@@ -47,6 +47,15 @@ export const storage = {
     });
   },
 
+  // 清空所有 localStorage 數據（包括非應用程式數據）
+  clearAll: (): void => {
+    try {
+      localStorage.clear();
+    } catch (error) {
+      console.error('清空所有數據失敗:', error);
+    }
+  },
+
   // 獲取存儲鍵
   keys: STORAGE_KEYS,
 };

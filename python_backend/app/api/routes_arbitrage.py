@@ -5,7 +5,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
-from app.services.arbitrage_engine import arb_engine, PairConfig, Leg
+from app.services.arbitrage_engine import arb_engine
+from app.services.twap_engine import twap_engine
+from app.api.routes_monitoring import clear_monitoring_data
+from app.services.arbitrage_engine import PairConfig, Leg
 from app.utils.logger import get_logger
 
 
@@ -23,6 +26,7 @@ class UpsertPairRequest(BaseModel):
     leg2: Leg
     threshold: float  # 允許負值
     qty: float = Field(gt=0)
+    totalAmount: float = Field(gt=0)  # 總金額
     enabled: bool = True
     depth: Optional[int] = Field(default=1, ge=1)
     maxExecs: Optional[int] = Field(default=1, ge=1)
@@ -99,6 +103,7 @@ async def upsert_pair(req: UpsertPairRequest):
             leg2=req.leg2,
             threshold=req.threshold,
             qty=req.qty,
+            totalAmount=req.totalAmount,
             enabled=req.enabled,
             max_execs=req.maxExecs or 1,
         )
@@ -182,6 +187,26 @@ async def update_pair(pair_id: str, req: UpdatePairRequest):
         raise
     except Exception as e:
         logger.error("arb_pair_update_failed", pairId=pair_id, error=str(e))
+        raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(e)})
+
+
+@router.post("/arbitrage/clear-all-data")
+async def clear_all_data():
+    """清空所有後端資料"""
+    try:
+        # 清空套利引擎資料
+        arb_engine.clear_all_data()
+        
+        # 清空 TWAP 引擎資料
+        twap_engine.clear_all_data()
+        
+        # 清空監控對資料
+        clear_monitoring_data()
+        
+        logger.info("all_backend_data_cleared", success=True)
+        return {"success": True, "message": "所有後端資料已清空"}
+    except Exception as e:
+        logger.error("clear_all_data_failed", error=str(e))
         raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(e)})
 
 

@@ -19,8 +19,8 @@ import logger from './utils/logger';
 import { apiService } from './services/api';
 import { AppDispatch } from './store';
 import { updateExchanges } from './store/slices/systemSlice';
-import storage from './utils/storage';
-import { setMonitoringPairs, setOpportunities, clearExecutionHistory } from './store/slices/arbitrageSlice';
+// 只保留實際使用的導入
+import ClearDataService from './services/clearDataService';
 
 const { Content } = Layout;
 
@@ -28,7 +28,34 @@ const App: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
   const { message } = AntdApp.useApp();
 
+  // 在組件加載前清空所有資料（在 useEffect 之外執行）
+  React.useLayoutEffect(() => {
+    // 清空 localStorage 中的所有資料
+    const { clearAll } = require('./utils/storage').default;
+    clearAll();
+    
+    // 設置初始化標記
+    sessionStorage.setItem('app_just_started', 'true');
+    
+    logger.info('應用程式啟動時清空本地存儲', {}, 'App');
+  }, []);
+  
   useEffect(() => {
+    // 重新啟動時清空所有資料
+    const initializeApp = async () => {
+      try {
+        // 清空後端資料
+        await ClearDataService.clearBackendData();
+        
+        // 清空前端 Redux 狀態
+        ClearDataService.clearFrontendData();
+        
+        logger.info('應用程式初始化完成，前後端資料已清空', {}, 'App');
+      } catch (error) {
+        logger.error('應用程式初始化失敗', error, 'App');
+      }
+    };
+
     // 載入交易所信息（延遲載入，避免初始請求）
     const loadExchanges = async () => {
       try {
@@ -41,6 +68,9 @@ const App: React.FC = () => {
       }
     };
 
+    // 先清空資料，再載入交易所信息
+    initializeApp();
+    
     // 延遲 2 秒載入，避免初始頁面載入時的請求
     const timer = setTimeout(loadExchanges, 2000);
 

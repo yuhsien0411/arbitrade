@@ -108,6 +108,28 @@ const systemSlice = createSlice({
     updateRiskLimits: (state, action: PayloadAction<Partial<SystemState['engineStatus']['riskLimits']>>) => {
       state.engineStatus.riskLimits = { ...state.engineStatus.riskLimits, ...action.payload };
     },
+    
+    // 清空所有系統資料
+    clearAllSystemData: (state) => {
+      state.isConnected = false;
+      state.connectionStatus = 'disconnected';
+      state.engineStatus = {
+        isRunning: false,
+        stats: {
+          totalTrades: 0,
+          successfulTrades: 0,
+          totalProfit: 0,
+          todayProfit: 0,
+        },
+        riskLimits: {
+          maxPositionSize: 1000,
+          maxDailyLoss: 100,
+          priceDeviationThreshold: 0.01,
+        },
+      };
+      state.exchanges = {};
+      state.notifications = [];
+    },
   },
 });
 
@@ -119,6 +141,7 @@ export const {
   removeNotification,
   clearNotifications,
   updateRiskLimits,
+  clearAllSystemData,
 } = systemSlice.actions;
 
 export default systemSlice.reducer;

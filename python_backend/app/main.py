@@ -23,6 +23,24 @@ async def lifespan(app: FastAPI):
     logger = get_logger()
     logger.info("service_start", success=True)
     
+    # 重新啟動時清空所有資料
+    try:
+        # 清空套利引擎資料
+        arb_engine.clear_all_data()
+        logger.info("arbitrage_engine_data_cleared_on_startup", success=True)
+        
+        # 導入並清空 TWAP 引擎資料
+        from app.services.twap_engine import twap_engine
+        twap_engine.clear_all_data()
+        logger.info("twap_engine_data_cleared_on_startup", success=True)
+        
+        # 清空監控對資料
+        from app.api.routes_monitoring import clear_monitoring_data
+        clear_monitoring_data()
+        logger.info("monitoring_data_cleared_on_startup", success=True)
+    except Exception as e:
+        logger.error("clear_data_failed_on_startup", error=str(e))
+    
     # 啟動套利引擎
     await arb_engine.start()
     logger.info("arbitrage_engine_started", success=True)

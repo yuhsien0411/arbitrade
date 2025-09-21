@@ -75,6 +75,24 @@ interface ArbitrageState {
 // 從本地存儲載入初始數據
 const loadInitialState = (): ArbitrageState => {
   try {
+    // 檢查是否是重新啟動
+    const isRestart = sessionStorage.getItem('app_just_started') !== 'true';
+    sessionStorage.setItem('app_just_started', 'true');
+    
+    // 如果是重新啟動，則清空本地存儲並返回空狀態
+    if (isRestart) {
+      console.log('系統重新啟動，清空本地存儲數據');
+      storage.remove(storage.keys.MONITORING_PAIRS);
+      storage.remove(storage.keys.ARBITRAGE_OPPORTUNITIES);
+      return {
+        monitoringPairs: [],
+        currentOpportunities: [],
+        recentExecutions: [],
+        isAutoExecuteEnabled: false,
+        executionHistory: [],
+      };
+    }
+    
     const rawPairs = storage.load(storage.keys.MONITORING_PAIRS, []);
     const rawOpportunities = storage.load(storage.keys.ARBITRAGE_OPPORTUNITIES, []);
     
@@ -236,6 +254,15 @@ const arbitrageSlice = createSlice({
       state.recentExecutions = [];
     },
     
+    // 清空所有套利資料
+    clearAllArbitrageData: (state) => {
+      state.monitoringPairs = [];
+      state.currentOpportunities = [];
+      state.recentExecutions = [];
+      state.executionHistory = [];
+      state.isAutoExecuteEnabled = false;
+    },
+    
     // 批量更新價格數據
     updatePricesForOpportunities: (state, action: PayloadAction<Array<{ id: string; leg1Price?: any; leg2Price?: any; spread: number; spreadPercent: number }>>) => {
       action.payload.forEach(update => {
@@ -284,6 +311,7 @@ export const {
   addExecution,
   setAutoExecute,
   clearExecutionHistory,
+  clearAllArbitrageData,
   updatePricesForOpportunities,
 } = arbitrageSlice.actions;
 
