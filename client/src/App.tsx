@@ -41,16 +41,10 @@ const App: React.FC = () => {
   }, []);
   
   useEffect(() => {
-    // 重新啟動時清空所有資料
+    // 應用程式初始化 - 不清空任何數據，直接載入現有數據
     const initializeApp = async () => {
       try {
-        // 清空後端資料
-        await ClearDataService.clearBackendData();
-        
-        // 清空前端 Redux 狀態
-        ClearDataService.clearFrontendData();
-        
-        logger.info('應用程式初始化完成，前後端資料已清空', {}, 'App');
+        logger.info('應用程式初始化完成，載入現有數據', {}, 'App');
       } catch (error) {
         logger.error('應用程式初始化失敗', error, 'App');
       }
@@ -68,7 +62,7 @@ const App: React.FC = () => {
       }
     };
 
-    // 先清空資料，再載入交易所信息
+    // 初始化應用程式，載入現有數據
     initializeApp();
     
     // 延遲 2 秒載入，避免初始頁面載入時的請求

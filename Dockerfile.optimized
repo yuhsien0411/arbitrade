@@ -1,13 +1,11 @@
-# 後端專用 Dockerfile
+# 優化版後端 Dockerfile
 FROM python:3.11-slim
 
 # 設置工作目錄
 WORKDIR /app
 
-# 安裝系統依賴
+# 只安裝必要的系統依賴（移除 gcc/g++）
 RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -38,3 +36,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # 啟動命令
 CMD ["python", "-m", "uvicorn", "python_backend.app.main:app", "--host", "0.0.0.0", "--port", "7000"]
+

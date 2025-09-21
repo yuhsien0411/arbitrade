@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 from typing import Literal, List, Dict, Any, Optional
 import time
 import uuid
+import json
+from pathlib import Path
 
 from ..utils.logger import get_logger
 
@@ -12,13 +14,65 @@ from ..utils.logger import get_logger
 router = APIRouter()
 logger = get_logger()
 
+# 數據持久化設置
+DATA_DIR = Path(__file__).parent.parent.parent.parent / "data"
+DATA_FILE = DATA_DIR / "monitoring_pairs.json"
+
+# 確保數據目錄存在
+DATA_DIR.mkdir(exist_ok=True)
+
 # 記憶體儲存（後續可改為資料庫）
 monitoring_pairs: Dict[str, Dict[str, Any]] = {}
+
+def load_monitoring_pairs() -> None:
+    """從文件載入監控對資料"""
+    try:
+        if DATA_FILE.exists():
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                monitoring_pairs.update(data)
+                logger.info("monitoring_pairs_loaded", count=len(monitoring_pairs))
+        else:
+            logger.info("monitoring_pairs_file_not_found", file=str(DATA_FILE))
+    except Exception as e:
+        logger.error("monitoring_pairs_load_failed", error=str(e))
+
+def save_monitoring_pairs() -> None:
+    """保存監控對資料到文件"""
+    try:
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(monitoring_pairs, f, ensure_ascii=False, indent=2)
+        logger.info("monitoring_pairs_saved", count=len(monitoring_pairs))
+    except Exception as e:
+        logger.error("monitoring_pairs_save_failed", error=str(e))
+
+# 載入現有數據
+load_monitoring_pairs()
 
 def clear_monitoring_data() -> None:
     """清空監控對資料"""
     monitoring_pairs.clear()
+    # 刪除數據文件
+    if DATA_FILE.exists():
+        DATA_FILE.unlink()
     logger.info("monitoring_data_cleared", success=True)
+
+def update_pair_trigger_stats(pair_id: str, success: bool = True) -> None:
+    """更新交易對的觸發統計"""
+    if pair_id in monitoring_pairs:
+        if 'totalTriggers' not in monitoring_pairs[pair_id]:
+            monitoring_pairs[pair_id]['totalTriggers'] = 0
+        if 'lastTriggered' not in monitoring_pairs[pair_id]:
+            monitoring_pairs[pair_id]['lastTriggered'] = None
+            
+        if success:
+            monitoring_pairs[pair_id]['totalTriggers'] += 1
+            monitoring_pairs[pair_id]['lastTriggered'] = int(time.time() * 1000)
+            save_monitoring_pairs()  # 保存到文件
+            logger.info("pair_trigger_stats_updated", 
+                      pairId=pair_id, 
+                      totalTriggers=monitoring_pairs[pair_id]['totalTriggers'],
+                      lastTriggered=monitoring_pairs[pair_id]['lastTriggered'])
 
 
 class Leg(BaseModel):
@@ -111,6 +165,7 @@ async def create_monitoring_pair(request: CreatePairRequest):
     }
     
     monitoring_pairs[pair_id] = config
+    save_monitoring_pairs()  # 保存到文件
     
     logger.info("pair_created", pairId=pair_id, success=True)
     
@@ -141,6 +196,8 @@ async def update_monitoring_pair(pair_id: str, request: UpdatePairRequest):
     if request.enabled is not None:
         config["enabled"] = request.enabled
     
+    save_monitoring_pairs()  # 保存到文件
+    
     logger.info("pair_updated", pairId=resolved_id, success=True)
     
     return {"success": True}
@@ -157,6 +214,7 @@ async def delete_monitoring_pair(pair_id: str):
         )
     
     del monitoring_pairs[resolved_id]
+    save_monitoring_pairs()  # 保存到文件
     
     logger.info("pair_deleted", pairId=resolved_id, success=True)
     

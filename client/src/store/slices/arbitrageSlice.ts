@@ -245,6 +245,14 @@ const arbitrageSlice = createSlice({
       }
     },
     
+    updatePairTriggerStats: (state, action: PayloadAction<{pairId: string, totalTriggers: number, lastTriggered: number | null}>) => {
+      const pairIndex = state.monitoringPairs.findIndex(p => p.id === action.payload.pairId);
+      if (pairIndex >= 0) {
+        state.monitoringPairs[pairIndex].totalTriggers = action.payload.totalTriggers;
+        state.monitoringPairs[pairIndex].lastTriggered = action.payload.lastTriggered;
+      }
+    },
+    
     setAutoExecute: (state, action: PayloadAction<boolean>) => {
       state.isAutoExecuteEnabled = action.payload;
     },
@@ -313,6 +321,7 @@ export const {
   clearExecutionHistory,
   clearAllArbitrageData,
   updatePricesForOpportunities,
+  updatePairTriggerStats,
 } = arbitrageSlice.actions;
 
 export default arbitrageSlice.reducer;

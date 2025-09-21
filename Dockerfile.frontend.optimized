@@ -1,0 +1,33 @@
+# 優化版前端 Dockerfile - 多階段構建
+FROM node:18-alpine AS builder
+
+# 設置工作目錄
+WORKDIR /app
+
+# 複製 package 文件
+COPY client/package*.json ./
+
+# 安裝依賴（包括 devDependencies）
+RUN npm ci
+
+# 複製源代碼
+COPY client/ ./
+
+# 構建應用
+RUN npm run build
+
+# 生產階段 - 使用 nginx
+FROM nginx:alpine
+
+# 複製構建結果
+COPY --from=builder /app/build /usr/share/nginx/html
+
+# 複製 nginx 配置
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# 暴露端口
+EXPOSE 3000
+
+# 啟動 nginx
+CMD ["nginx", "-g", "daemon off;"]
+

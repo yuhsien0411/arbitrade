@@ -83,11 +83,16 @@ class ArbitrageEngine:
 
     def clear_all_data(self) -> None:
         """清空所有套利引擎資料"""
-        self._pairs.clear()
+        # 只清空執行相關數據，保留監控對配置
         self._executions_count.clear()
         self._executing_pairs.clear()
         self._executions_history.clear()
-        self.logger.info("arb_engine_data_cleared", success=True)
+        self.logger.info("arb_engine_execution_data_cleared", success=True)
+    
+    def clear_monitoring_pairs(self) -> None:
+        """清空監控對資料（用於完全重置）"""
+        self._pairs.clear()
+        self.logger.info("arb_engine_monitoring_pairs_cleared", success=True)
 
     def upsert_pair(self, pair_id: str, config: PairConfig) -> None:
         self._pairs[pair_id] = config
@@ -352,6 +357,13 @@ class ArbitrageEngine:
                            leg2Price=leg2_result.price)
             # 增加次數
             self._executions_count[pair_id] = self._executions_count.get(pair_id, 0) + 1
+            
+            # 更新監控對的觸發統計
+            try:
+                from ..api.routes_monitoring import update_pair_trigger_stats
+                update_pair_trigger_stats(pair_id, success=True)
+            except Exception as e:
+                self.logger.error("arb_update_trigger_stats_failed", pairId=pair_id, error=str(e))
 
             # 記錄到執行歷史
             history = self._executions_history.setdefault(pair_id, [])

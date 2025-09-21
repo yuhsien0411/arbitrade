@@ -1,9 +1,10 @@
-
 version: '3.8'
 
 services:
   arbitrade-backend:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.optimized
     container_name: arbitrade-backend
     ports:
       - "7000:7000"
@@ -26,7 +27,7 @@ services:
   arbitrade-frontend:
     build:
       context: .
-      dockerfile: Dockerfile.frontend
+      dockerfile: Dockerfile.frontend.optimized
     container_name: arbitrade-frontend
     ports:
       - "3000:3000"
@@ -39,3 +40,4 @@ services:
 networks:
   arbitrade-network:
     driver: bridge
+

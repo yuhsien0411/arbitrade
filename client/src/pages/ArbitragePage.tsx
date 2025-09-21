@@ -15,7 +15,7 @@ import {
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
 import { apiService, MonitoringPairConfig } from '../services/api';
-import { addMonitoringPair, removeMonitoringPair, updateMonitoringPair, updateOpportunity, setMonitoringPairs, setOpportunities, addExecution, clearExecutionHistory, setRecentExecutions } from '../store/slices/arbitrageSlice';
+import { addMonitoringPair, removeMonitoringPair, updateMonitoringPair, updateOpportunity, setMonitoringPairs, setOpportunities, addExecution, clearExecutionHistory, setRecentExecutions, updatePairTriggerStats } from '../store/slices/arbitrageSlice';
 import { updateExchanges } from '../store/slices/systemSlice';
 import { formatAmountWithCurrency, getBaseCurrencyFromSymbol } from '../utils/formatters';
 import logger from '../utils/logger';
@@ -165,6 +165,18 @@ const ArbitragePage: React.FC = () => {
         });
         // 以一次性覆蓋，避免殘留舊資料
         dispatch(setMonitoringPairs(normalized as any));
+        
+        // 更新觸發統計
+        normalized.forEach((pair: any) => {
+          if (pair.totalTriggers !== undefined || pair.lastTriggered !== undefined) {
+            dispatch(updatePairTriggerStats({
+              pairId: pair.id,
+              totalTriggers: pair.totalTriggers || 0,
+              lastTriggered: pair.lastTriggered || null
+            }));
+          }
+        });
+        
         logger.info('已載入套利監控對', { count: normalized.length }, 'ArbitragePage');
       } else {
         // 如果後端沒有數據，嘗試從本地存儲載入
