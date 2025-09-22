@@ -70,6 +70,45 @@ class EnvConfig:
             "binance": self.get_exchange_config("binance")
         }
     
+    def validate_api_keys(self) -> dict:
+        """驗證 API 金鑰格式"""
+        errors = []
+        warnings = []
+        
+        # 檢查 Bybit API 金鑰
+        if self.BYBIT_API_KEY:
+            if len(self.BYBIT_API_KEY) < 10:
+                errors.append("BYBIT_API_KEY 格式不正確（長度不足）")
+            if not self.BYBIT_SECRET:
+                errors.append("BYBIT_SECRET 缺失")
+            elif len(self.BYBIT_SECRET) < 10:
+                errors.append("BYBIT_SECRET 格式不正確（長度不足）")
+        elif self.BYBIT_SECRET:
+            errors.append("BYBIT_API_KEY 缺失")
+        
+        # 檢查 Binance API 金鑰
+        if self.BINANCE_API_KEY:
+            if len(self.BINANCE_API_KEY) < 10:
+                errors.append("BINANCE_API_KEY 格式不正確（長度不足）")
+            if not self.BINANCE_SECRET:
+                errors.append("BINANCE_SECRET 缺失")
+            elif len(self.BINANCE_SECRET) < 10:
+                errors.append("BINANCE_SECRET 格式不正確（長度不足）")
+        elif self.BINANCE_SECRET:
+            errors.append("BINANCE_API_KEY 缺失")
+        
+        # 檢查是否至少配置了一個交易所
+        if not (self.BYBIT_API_KEY and self.BYBIT_SECRET) and not (self.BINANCE_API_KEY and self.BINANCE_SECRET):
+            warnings.append("未配置任何交易所 API 金鑰，將只能使用公開數據")
+        
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "bybit_configured": bool(self.BYBIT_API_KEY and self.BYBIT_SECRET),
+            "binance_configured": bool(self.BINANCE_API_KEY and self.BINANCE_SECRET)
+        }
+    
     def is_configured(self) -> bool:
         """檢查是否有任何交易所已配置 API 金鑰"""
         bybit_configured = bool(self.BYBIT_API_KEY and self.BYBIT_SECRET)

@@ -115,6 +115,9 @@ class ArbitrageEngine:
                 )
         except Exception as e:
             self.logger.error("arb_pair_pre_subscribe_error", pairId=pair_id, error=str(e))
+        
+        # 新增監控對後立即刷新價格數據
+        asyncio.create_task(self._refresh_pair_prices(pair_id, config))
 
     def remove_pair(self, pair_id: str) -> None:
         if pair_id in self._pairs:
@@ -149,6 +152,16 @@ class ArbitrageEngine:
                             type=config["leg2"]["type"],
                             side=config["leg2"].get("side", "sell")  # 使用配置的side或預設為賣出
                         )
+                        
+                        # 添加載入時的驗證日誌
+                        self.logger.info("arb_pair_loaded_debug", 
+                                       pairId=pair_id,
+                                       leg1Type=leg1.type,
+                                       leg1Symbol=leg1.symbol,
+                                       leg1Side=leg1.side,
+                                       leg2Type=leg2.type,
+                                       leg2Symbol=leg2.symbol,
+                                       leg2Side=leg2.side)
                         
                         pair_config = PairConfig(
                             leg1=leg1,
@@ -190,6 +203,91 @@ class ArbitrageEngine:
                 )
         except Exception as e:
             self.logger.error("arb_pair_subscribe_error", error=str(e))
+
+    async def _refresh_pair_prices(self, pair_id: str, config: PairConfig) -> None:
+        """刷新指定監控對的價格數據"""
+        try:
+            self.logger.info("arb_refresh_prices_start", pairId=pair_id)
+            
+            # 獲取 Leg1 價格
+            leg1_bid = leg1_ask = 0.0
+            if config.leg1.exchange == "bybit":
+                b, a = bybit_orderbook_feed.get_top_of_book(
+                    category="linear" if config.leg1.type in ("linear", "future", "futures") else "spot",
+                    symbol=config.leg1.symbol,
+                    depth=1,
+                )
+                leg1_bid = b or 0.0
+                leg1_ask = a or 0.0
+            
+            # 如果 WebSocket 沒有數據，使用 HTTP 拉取
+            if leg1_bid == 0.0 and leg1_ask == 0.0:
+                leg1_book = await _fetch_orderbook(config.leg1.exchange, config.leg1.symbol)
+                leg1_bid = float(leg1_book.get("bids", [[0]])[0][0]) if leg1_book.get("bids") else 0.0
+                leg1_ask = float(leg1_book.get("asks", [[0]])[0][0]) if leg1_book.get("asks") else 0.0
+            
+            # 獲取 Leg2 價格
+            leg2_bid = leg2_ask = 0.0
+            if config.leg2.exchange == "bybit":
+                b, a = bybit_orderbook_feed.get_top_of_book(
+                    category="linear" if config.leg2.type in ("linear", "future", "futures") else "spot",
+                    symbol=config.leg2.symbol,
+                    depth=1,
+                )
+                leg2_bid = b or 0.0
+                leg2_ask = a or 0.0
+            
+            # 如果 WebSocket 沒有數據，使用 HTTP 拉取
+            if leg2_bid == 0.0 and leg2_ask == 0.0:
+                leg2_book = await _fetch_orderbook(config.leg2.exchange, config.leg2.symbol)
+                leg2_bid = float(leg2_book.get("bids", [[0]])[0][0]) if leg2_book.get("bids") else 0.0
+                leg2_ask = float(leg2_book.get("asks", [[0]])[0][0]) if leg2_book.get("asks") else 0.0
+            
+            # 計算價差
+            leg1_exec = leg1_ask if config.leg1.side == "buy" else leg1_bid
+            leg2_exec = leg2_ask if config.leg2.side == "buy" else leg2_bid
+            
+            if leg1_exec > 0 and leg2_exec > 0:
+                base = leg1_exec
+                spread = leg2_exec - leg1_exec
+                spread_pct = (spread / base) * 100.0
+                
+                # 推播價格更新到前端
+                if ws_manager is not None:
+                    payload = json.dumps({
+                        "type": "priceUpdate",
+                        "data": {
+                            "id": pair_id,
+                            "pairConfig": {
+                                "id": pair_id,
+                                "leg1": {"exchange": config.leg1.exchange, "symbol": config.leg1.symbol, "type": config.leg1.type, "side": config.leg1.side},
+                                "leg2": {"exchange": config.leg2.exchange, "symbol": config.leg2.symbol, "type": config.leg2.type, "side": config.leg2.side},
+                                "threshold": config.threshold
+                            },
+                            "leg1Price": {"symbol": config.leg1.symbol, "exchange": config.leg1.exchange, "bid1": {"price": leg1_bid}, "ask1": {"price": leg1_ask}},
+                            "leg2Price": {"symbol": config.leg2.symbol, "exchange": config.leg2.exchange, "bid1": {"price": leg2_bid}, "ask1": {"price": leg2_ask}},
+                            "spread": spread,
+                            "spreadPercent": spread_pct,
+                            "threshold": config.threshold,
+                            "timestamp": int(time.time() * 1000),
+                            "refreshed": True  # 標記為手動刷新
+                        }
+                    })
+                    await ws_manager.broadcast(payload)
+                    
+                self.logger.info("arb_prices_refreshed", 
+                               pairId=pair_id,
+                               leg1Bid=leg1_bid,
+                               leg1Ask=leg1_ask,
+                               leg2Bid=leg2_bid,
+                               leg2Ask=leg2_ask,
+                               spread=spread,
+                               spreadPct=spread_pct)
+            else:
+                self.logger.warning("arb_refresh_prices_no_data", pairId=pair_id)
+                
+        except Exception as e:
+            self.logger.error("arb_refresh_prices_error", pairId=pair_id, error=str(e))
 
     # -------- 內部邏輯 --------
     async def _run_loop(self) -> None:
@@ -338,6 +436,8 @@ class ArbitrageEngine:
             leg1_result = await self._place_order(config.leg1, config.qty)
             if not leg1_result.success:
                 self.logger.error("arb_leg1_failed", pairId=pair_id, error=leg1_result.error_message)
+                # Leg1 失敗，標記執行失敗並結束
+                self._mark_execution_failed(pair_id, "leg1_failed", leg1_result.error_message)
                 return
                 
             # 執行 Leg2 訂單
@@ -345,7 +445,11 @@ class ArbitrageEngine:
             if not leg2_result.success:
                 # Leg2 失敗，回滾 Leg1
                 self.logger.warning("arb_leg2_failed_rollback", pairId=pair_id, leg1OrderId=leg1_result.order_id)
-                await self._rollback_order(config.leg1, config.qty, leg1_result.order_id)
+                rollback_result = await self._rollback_order(config.leg1, config.qty, leg1_result.order_id)
+                
+                # 回滾完成後，標記執行失敗並結束
+                self._mark_execution_failed(pair_id, "leg2_failed_rollback_completed", 
+                                          f"Leg2 failed: {leg2_result.error_message}, Rollback: {'success' if rollback_result else 'failed'}")
                 return
                 
             # 兩腿都成功
@@ -435,6 +539,8 @@ class ArbitrageEngine:
                            
         except Exception as e:
             self.logger.error("arb_execute_error", pairId=pair_id, error=str(e))
+            # 發生異常時標記執行失敗
+            self._mark_execution_failed(pair_id, "execution_exception", str(e))
         finally:
             # 釋放執行鎖
             if pair_id in self._executing_pairs:
@@ -471,8 +577,31 @@ class ArbitrageEngine:
             side = "Buy" if leg.side == "buy" else "Sell"
             quantity = str(qty)
 
-            if leg.type in ("linear", "future", "futures"):
+            # 添加詳細的類型判斷日誌
+            self.logger.info("arb_place_order_debug", 
+                           legType=leg.type, 
+                           legTypeType=type(leg.type).__name__,
+                           symbol=leg.symbol,
+                           side=leg.side,
+                           exchange=leg.exchange)
+
+            # 更嚴格的類型判斷
+            is_contract = leg.type in ("linear", "future", "futures")
+            is_spot = leg.type == "spot"
+            
+            if not is_contract and not is_spot:
+                self.logger.error("arb_invalid_leg_type", 
+                                legType=leg.type, 
+                                symbol=leg.symbol,
+                                message="未知的 Leg 類型，默認使用現貨")
+                is_spot = True  # 默認使用現貨
+
+            if is_contract:
                 # 合約下單（市價）
+                self.logger.info("arb_placing_contract_order", 
+                               symbol=leg.symbol, 
+                               side=side, 
+                               qty=quantity)
                 response = client.place_order(
                     category="linear",
                     symbol=leg.symbol,
@@ -482,6 +611,10 @@ class ArbitrageEngine:
                 )
             else:
                 # 現貨下單（Bybit 需要 marketUnit，若走槓桿現貨需 isLeverage）
+                self.logger.info("arb_placing_spot_order", 
+                               symbol=leg.symbol, 
+                               side=side, 
+                               qty=quantity)
                 response = client.place_order(
                     category="spot",
                     symbol=leg.symbol,
@@ -503,7 +636,7 @@ class ArbitrageEngine:
         except Exception as e:
             return OrderResult(success=False, price=None, order_id=None, error_message=str(e))
 
-    async def _rollback_order(self, leg: Leg, qty: float, original_order_id: str) -> None:
+    async def _rollback_order(self, leg: Leg, qty: float, original_order_id: str) -> bool:
         """回滾訂單（執行反向操作）"""
         try:
             # 反向操作
@@ -520,13 +653,63 @@ class ArbitrageEngine:
                 self.logger.info("arb_rollback_success", 
                                originalOrderId=original_order_id,
                                rollbackOrderId=rollback_result.order_id)
+                return True
             else:
                 self.logger.error("arb_rollback_failed", 
                                 originalOrderId=original_order_id,
                                 error=rollback_result.error_message)
+                return False
                                 
         except Exception as e:
             self.logger.error("arb_rollback_error", originalOrderId=original_order_id, error=str(e))
+            return False
+
+    def _mark_execution_failed(self, pair_id: str, reason: str, error_message: str) -> None:
+        """標記執行失敗並記錄錯誤"""
+        # 記錄執行失敗
+        self.logger.error("arb_execution_failed", 
+                         pairId=pair_id, 
+                         reason=reason, 
+                         error=error_message)
+        
+        # 增加失敗次數（用於統計）
+        if pair_id not in self._executions_history:
+            self._executions_history[pair_id] = []
+        
+        # 記錄失敗歷史
+        self._executions_history[pair_id].append({
+            "ts": int(time.time() * 1000),
+            "pairId": pair_id,
+            "success": False,
+            "reason": reason,
+            "error": error_message,
+            "leg1": None,
+            "leg2": None
+        })
+        
+        # 更新監控對的觸發統計（失敗）
+        try:
+            from ..api.routes_monitoring import update_pair_trigger_stats
+            update_pair_trigger_stats(pair_id, success=False)
+        except Exception as e:
+            self.logger.error("arb_update_trigger_stats_failed", pairId=pair_id, error=str(e))
+        
+        # 推播失敗事件到前端
+        try:
+            if ws_manager is not None:
+                payload = json.dumps({
+                    "type": "arbitrageFailed",
+                    "data": {
+                        "pairId": pair_id,
+                        "reason": reason,
+                        "error": error_message,
+                        "ts": int(time.time() * 1000)
+                    }
+                })
+                import asyncio
+                asyncio.create_task(ws_manager.broadcast(payload))
+        except Exception:
+            pass
 
 
 # 全域引擎實例

@@ -190,6 +190,42 @@ async def update_pair(pair_id: str, req: UpdatePairRequest):
         raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(e)})
 
 
+@router.post("/arbitrage/refresh-prices")
+async def refresh_all_prices():
+    """刷新所有監控對的價格數據"""
+    try:
+        refreshed_count = 0
+        for pair_id, config in arb_engine._pairs.items():
+            if config.enabled:
+                await arb_engine._refresh_pair_prices(pair_id, config)
+                refreshed_count += 1
+        
+        logger.info("arb_prices_refresh_all", count=refreshed_count, success=True)
+        return {"success": True, "message": f"已刷新 {refreshed_count} 個監控對的價格數據"}
+    except Exception as e:
+        logger.error("arb_prices_refresh_all_failed", error=str(e))
+        raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(e)})
+
+
+@router.post("/arbitrage/pairs/{pair_id}/refresh-prices")
+async def refresh_pair_prices(pair_id: str):
+    """刷新指定監控對的價格數據"""
+    try:
+        config = arb_engine._pairs.get(pair_id)
+        if not config:
+            raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "監控對不存在"})
+        
+        await arb_engine._refresh_pair_prices(pair_id, config)
+        
+        logger.info("arb_prices_refresh_pair", pairId=pair_id, success=True)
+        return {"success": True, "message": f"已刷新監控對 {pair_id} 的價格數據"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("arb_prices_refresh_pair_failed", pairId=pair_id, error=str(e))
+        raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(e)})
+
+
 @router.post("/arbitrage/clear-all-data")
 async def clear_all_data():
     """清空所有後端資料"""

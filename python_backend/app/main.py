@@ -57,9 +57,14 @@ app = FastAPI(title="Arbitrage Python Backend", lifespan=lifespan)
 # 添加 CORS 中間件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -75,6 +80,26 @@ async def health():
     return response
 
 
+@app.get("/api/config/status")
+async def config_status():
+    """檢查系統配置狀態"""
+    from app.config.env import config
+    
+    validation_result = config.validate_api_keys()
+    
+    return {
+        "success": True,
+        "data": {
+            "api_validation": validation_result,
+            "exchanges": config.get_all_exchanges_config(),
+            "system": {
+                "debug": config.DEBUG,
+                "log_level": config.LOG_LEVEL
+            }
+        }
+    }
+
+
 app.include_router(prices_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
 app.include_router(monitoring_router, prefix="/api")
@@ -86,24 +111,55 @@ app.include_router(arbitrage_router, prefix="/api")
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
+        self.connection_heartbeat: dict[WebSocket, float] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        self.connection_heartbeat[websocket] = time.time()
+        logger.info("websocket_connected", total_connections=len(self.active_connections))
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+        if websocket in self.connection_heartbeat:
+            del self.connection_heartbeat[websocket]
+        logger.info("websocket_disconnected", total_connections=len(self.active_connections))
 
     async def send_personal_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
+        try:
+            await websocket.send_text(message)
+            self.connection_heartbeat[websocket] = time.time()
+        except Exception as e:
+            logger.error("websocket_send_failed", error=str(e))
+            await self.disconnect(websocket)
 
     async def broadcast(self, message: str):
+        disconnected_connections = []
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
-            except:
-                # 移除斷開的連接
-                self.active_connections.remove(connection)
+                self.connection_heartbeat[connection] = time.time()
+            except Exception as e:
+                logger.error("websocket_broadcast_failed", error=str(e))
+                disconnected_connections.append(connection)
+        
+        # 清理斷開的連接
+        for connection in disconnected_connections:
+            await self.disconnect(connection)
+
+    async def cleanup_stale_connections(self):
+        """清理過期的連接"""
+        current_time = time.time()
+        stale_connections = []
+        
+        for ws, last_heartbeat in self.connection_heartbeat.items():
+            if current_time - last_heartbeat > 60:  # 60秒無心跳
+                stale_connections.append(ws)
+        
+        for ws in stale_connections:
+            await self.disconnect(ws)
+            logger.info("stale_connection_cleaned")
 
 manager = ConnectionManager()
 

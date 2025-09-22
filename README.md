@@ -102,22 +102,108 @@ docker-compose logs -f arbitrade-frontend
 3. 設定時間間隔和執行策略
 4. 啟動 TWAP 執行
 
+## 🔍 系統檢查
+
+在啟動前，建議先運行系統檢查腳本：
+
+```bash
+# 檢查系統配置和依賴
+python check_system.py
+```
+
 ## ❓ 常見問題
 
 ### Q: 啟動失敗怎麼辦？
-A: 請檢查：
-1. Docker 是否正在運行
-2. 端口 3000 和 7000 是否被佔用
-3. `.env` 文件中的 API 密鑰是否正確
+A: 請按順序檢查：
+1. **環境文件**：確保 `.env` 文件存在且配置正確
+   ```bash
+   cp env.example .env
+   # 編輯 .env 文件填入真實的 API 金鑰
+   ```
+2. **Docker 服務**：確保 Docker Desktop 正在運行
+3. **端口佔用**：檢查端口 3000 和 7000 是否被佔用
+   ```bash
+   # Windows
+   netstat -an | findstr :3000
+   netstat -an | findstr :7000
+   ```
+4. **API 密鑰**：確保 `.env` 文件中的 API 密鑰格式正確
 
 ### Q: 如何查看錯誤日誌？
-A: 運行 `docker-compose logs -f` 查看詳細日誌
+A: 使用以下命令查看詳細日誌：
+```bash
+# 查看所有服務日誌
+docker-compose logs -f
+
+# 查看特定服務日誌
+docker-compose logs -f arbitrade-backend
+docker-compose logs -f arbitrade-frontend
+
+# 查看最近的錯誤
+docker-compose logs --tail=50 arbitrade-backend
+```
+
+### Q: 如何檢查系統狀態？
+A: 訪問以下端點檢查系統狀態：
+- **健康檢查**：http://localhost:7000/health
+- **配置狀態**：http://localhost:7000/api/config/status
+- **前端界面**：http://localhost:3000
 
 ### Q: 如何停止服務？
-A: 運行 `docker-compose down` 停止所有服務
+A: 運行以下命令停止服務：
+```bash
+# 停止所有服務
+docker-compose down
+
+# 停止並刪除所有數據
+docker-compose down -v
+```
 
 ### Q: 如何重新配置？
-A: 編輯 `.env` 文件後運行 `docker-compose restart`
+A: 編輯 `.env` 文件後重啟服務：
+```bash
+# 重啟所有服務
+docker-compose restart
+
+# 重新構建並啟動
+docker-compose up -d --build
+```
+
+### Q: WebSocket 連接問題？
+A: 如果前端無法連接到 WebSocket：
+1. 檢查防火牆設置
+2. 確認端口 7000 可訪問
+3. 查看瀏覽器控制台錯誤信息
+4. 檢查後端日誌中的 WebSocket 錯誤
+
+### Q: API 連接失敗？
+A: 如果交易所 API 連接失敗：
+1. 檢查 `.env` 文件中的 API 金鑰是否正確
+2. 確認 API 金鑰具有適當的權限
+3. 檢查網絡連接和防火牆設置
+4. 查看後端日誌中的 API 錯誤信息
+
+### Q: 雙腿下單執行失敗怎麼辦？
+A: 系統現在具備完善的錯誤處理機制：
+1. **Leg1 失敗**：立即標記失敗並結束執行
+2. **Leg2 失敗**：自動回滾 Leg1，完成後標記失敗並結束
+3. **執行異常**：捕獲異常並標記失敗狀態
+4. **失敗記錄**：所有失敗都會記錄在執行歷史中
+5. **前端通知**：失敗事件會即時推播到前端界面
+
+### Q: 如何查看執行失敗記錄？
+A: 可以通過以下方式查看：
+1. **後端日誌**：查看 `arb_execution_failed` 相關日誌
+2. **執行歷史**：通過 API 端點查看詳細的失敗記錄
+3. **前端界面**：失敗事件會即時顯示在界面上
+
+### Q: 如何刷新價格數據？
+A: 系統提供多種價格刷新方式：
+1. **自動刷新**：新增監控對時自動刷新價格數據
+2. **手動刷新所有**：`POST /api/arbitrage/refresh-prices`
+3. **手動刷新指定**：`POST /api/arbitrage/pairs/{pair_id}/refresh-prices`
+4. **即時推送**：價格更新通過 WebSocket 即時推送到前端
+5. **標記區分**：手動刷新的數據會標記 `refreshed: true`
 
 ## ⚠️ 重要提醒
 
