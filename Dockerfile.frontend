@@ -14,7 +14,8 @@ RUN npm ci
 COPY client/ ./
 
 # 構建應用
-RUN npm run build
+# 有些環境下 node_modules/.bin 可能缺少執行權限，先修正權限再構建
+RUN chmod +x node_modules/.bin/* || true && npm run build
 
 # 安裝 serve 用於提供靜態文件
 RUN npm install -g serve

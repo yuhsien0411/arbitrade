@@ -46,7 +46,7 @@ cp env.example .env
 docker-compose up -d --build
 ```
 後端
-python -m uvicorn app.main:app --host 0.0.0.0 --port 7000
+py -m uvicorn app.main:app --host 0.0.0.0 --port 7000
 
 ### 4. 訪問系統
 - **前端界面**：http://localhost:3000
@@ -191,6 +191,14 @@ A: 系統現在具備完善的錯誤處理機制：
 4. **失敗記錄**：所有失敗都會記錄在執行歷史中
 5. **前端通知**：失敗事件會即時推播到前端界面
 
+### Q: Bybit 現貨報錯「Symbol is not supported on Margin Trading (ErrCode: 170344)」怎麼辦？
+A: 這代表該現貨交易對不支援「現貨保證金（Margin）」模式。
+
+- 系統處理方式：
+  - 套利引擎 `arbitrage_engine` 針對現貨下單已不再預設傳入 `isLeverage=1`，改以現貨現金模式下單（不帶 `isLeverage` 參數）。
+  - TWAP 引擎 `twap_engine` 預設以現貨現金模式下單；若偵測到 `170344`，會自動改用不帶 `isLeverage` 參數重試一次。
+- 你需要做的事：通常不需要調整設定即可恢復；若自訂了槓桿現貨，請確認該交易對確實支援，否則請改用現貨現金模式。
+
 ### Q: 如何查看執行失敗記錄？
 A: 可以通過以下方式查看：
 1. **後端日誌**：查看 `arb_execution_failed` 相關日誌
@@ -204,6 +212,13 @@ A: 系統提供多種價格刷新方式：
 3. **手動刷新指定**：`POST /api/arbitrage/pairs/{pair_id}/refresh-prices`
 4. **即時推送**：價格更新通過 WebSocket 即時推送到前端
 5. **標記區分**：手動刷新的數據會標記 `refreshed: true`
+
+### Q: 觸發次數顯示為 0 或消失？
+A: 這通常是 WebSocket 消息處理問題，已修復：
+1. **後端修復**：`arbitrageExecuted` 消息現在包含 `totalTriggers` 數據
+2. **前端修復**：WebSocket 處理器正確更新觸發統計
+3. **自動更新**：每次成功執行後觸發次數會自動增加
+4. **即時顯示**：觸發次數會即時更新在監控對列表中
 
 ## ⚠️ 重要提醒
 

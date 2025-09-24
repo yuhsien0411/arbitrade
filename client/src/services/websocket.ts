@@ -5,7 +5,7 @@
 
 import { AppDispatch } from '../store';
 import { setConnectionStatus, addNotification, updateEngineStatus } from '../store/slices/systemSlice';
-import { updateOpportunity, addExecution, setMonitoringPairs, removeMonitoringPair } from '../store/slices/arbitrageSlice';
+import { updateOpportunity, addExecution, setMonitoringPairs, removeMonitoringPair, updatePairTriggerStats } from '../store/slices/arbitrageSlice';
 import { apiService } from './api';
 import { addExecution as addTwapExecution, setStrategies } from '../store/slices/twapSlice';
 import { updatePrice } from '../store/slices/pricesSlice';
@@ -207,11 +207,13 @@ function handleWebSocketMessage(message: any, dispatch: AppDispatch) {
         const now = timestamp || Date.now();
         const leg1 = data.leg1 || {};
         const leg2 = data.leg2 || {};
+        const pairId = data.pairId;
+        
         dispatch(addExecution({
           opportunity: {
-            id: data.pairId,
+            id: pairId,
             pairConfig: {
-              id: data.pairId,
+              id: pairId,
               leg1: { exchange: leg1.exchange || '', symbol: leg1.symbol || '', type: leg1.type || 'spot', side: leg1.side || 'buy' },
               leg2: { exchange: leg2.exchange || '', symbol: leg2.symbol || '', type: leg2.type || 'spot', side: leg2.side || 'sell' },
               threshold: 0,
@@ -234,6 +236,13 @@ function handleWebSocketMessage(message: any, dispatch: AppDispatch) {
           success: true,
           timestamp: now,
         } as any));
+
+        // 更新觸發統計
+        dispatch(updatePairTriggerStats({
+          pairId: pairId,
+          totalTriggers: data.totalTriggers || 0,
+          lastTriggered: now
+        }));
 
         dispatch(addNotification({
           type: 'success',
@@ -282,6 +291,28 @@ function handleWebSocketMessage(message: any, dispatch: AppDispatch) {
             });
           } catch {}
         })();
+      }
+      break;
+
+    case 'arbitrageFailed':
+      // 套利執行失敗：彈出警示並加入通知中心
+      if (data) {
+        const reason = data.reason || 'unknown';
+        const errorMsg = data.error || '發生未知錯誤';
+        const pairId = data.pairId || '';
+        const alertText = `套利執行失敗\nPair: ${pairId}\n原因: ${reason}\n錯誤: ${errorMsg}`;
+        try { window.alert(alertText); } catch {}
+
+        dispatch(addNotification({
+          type: 'error',
+          message: `${pairId ? `[${pairId}] ` : ''}${reason}: ${errorMsg}`
+        }));
+
+        // 派發自定義事件，方便頁面需要額外處理時監聽
+        try {
+          const customEvent = new CustomEvent('arbitrageFailed', { detail: { type: 'arbitrageFailed', data } });
+          window.dispatchEvent(customEvent);
+        } catch {}
       }
       break;
 

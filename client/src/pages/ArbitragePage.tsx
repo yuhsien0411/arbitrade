@@ -147,7 +147,8 @@ const ArbitragePage: React.FC = () => {
             leg2: {
               ...(pair?.leg2 || {}),
               side: pair.leg2?.side || 'sell',
-              type: pair.leg2?.type || 'linear'
+              // 避免預設為 linear 導致兩腿都變合約；安全預設為 spot
+              type: pair.leg2?.type || 'spot'
             },
             threshold: pair.threshold ?? 0.1,
             qty: pair.qty || 0.001,
@@ -203,32 +204,77 @@ const ArbitragePage: React.FC = () => {
 
   // 處理 WebSocket 推送的價格更新
   useEffect(() => {
+    // 計算「可套利」定義的差價：賣腿可成交價 − 買腿可成交價
+    const computeProfitableSpread = (pairCfg: any, leg1Price: any, leg2Price: any) => {
+      const leg1Side = pairCfg?.leg1?.side || 'buy';
+      const leg2Side = pairCfg?.leg2?.side || 'sell';
+      const leg1Exec = leg1Side === 'buy' ? leg1Price?.ask1?.price : leg1Price?.bid1?.price;
+      const leg2Exec = leg2Side === 'buy' ? leg2Price?.ask1?.price : leg2Price?.bid1?.price;
+      // 將兩腿拆成 buyLeg / sellLeg 後計算 sell − buy
+      const buyExec = leg1Side === 'buy' ? leg1Exec : leg2Exec;
+      const sellExec = leg1Side === 'sell' ? leg1Exec : leg2Exec;
+      const spread = (typeof sellExec === 'number' && typeof buyExec === 'number') ? (sellExec - buyExec) : 0;
+      const base = (typeof buyExec === 'number' && buyExec > 0) ? buyExec : 1;
+      const spreadPct = (spread / base) * 100;
+      return { spread, spreadPct };
+    };
+
     const handlePriceUpdate = (event: any) => {
       try {
-        const data = event.detail || event;
-        if (data.type === 'priceUpdate' && data.data) {
-          const { id, leg1Price, leg2Price, spread, spreadPercent, threshold } = data.data;
+        const payload = event.detail || event;
+        const msgType = payload?.type;
+        const body = payload?.data || payload; // 兼容 {type, data} 與直接傳物件
+        if (msgType === 'priceUpdate' && body && (body.id || (body.pairConfig && body.pairConfig.id))) {
+          const { id, leg1Price, leg2Price, threshold, pairConfig } = body;
+          const { spread, spreadPct } = computeProfitableSpread(pairConfig, leg1Price, leg2Price);
           
           // 更新對應監控對的價格數據
           const opportunity = {
             id,
-            pairConfig: {
-              id,
-              leg1: { exchange: leg1Price.exchange, symbol: leg1Price.symbol, type: 'linear' as 'linear' | 'inverse' | 'spot' | 'future', side: 'buy' as 'buy' | 'sell' },
-              leg2: { exchange: leg2Price.exchange, symbol: leg2Price.symbol, type: 'spot' as 'linear' | 'inverse' | 'spot' | 'future', side: 'sell' as 'buy' | 'sell' },
-              threshold,
-              amount: 0,
-              enabled: true,
-              createdAt: Date.now(),
-              lastTriggered: null,
-              totalTriggers: 0
-            },
+            // 使用後端提供的 pairConfig，若缺失則以安全預設構建，確保型別正確
+            pairConfig: (() => {
+              if (pairConfig && pairConfig.leg1 && pairConfig.leg2) {
+                return {
+                  id: pairConfig.id || id,
+                  leg1: {
+                    exchange: pairConfig.leg1?.exchange || leg1Price.exchange,
+                    symbol: pairConfig.leg1?.symbol || leg1Price.symbol,
+                    type: (pairConfig.leg1?.type as any) || 'spot',
+                    side: (pairConfig.leg1?.side as any) || 'buy'
+                  },
+                  leg2: {
+                    exchange: pairConfig.leg2?.exchange || leg2Price.exchange,
+                    symbol: pairConfig.leg2?.symbol || leg2Price.symbol,
+                    type: (pairConfig.leg2?.type as any) || 'spot',
+                    side: (pairConfig.leg2?.side as any) || 'sell'
+                  },
+                  threshold: typeof pairConfig.threshold === 'number' ? pairConfig.threshold : threshold,
+                  amount: 0,
+                  enabled: true,
+                  createdAt: Date.now(),
+                  lastTriggered: null,
+                  totalTriggers: 0
+                } as any;
+              }
+              // 後端未提供 pairConfig 時的保底
+              return {
+                id,
+                leg1: { exchange: leg1Price.exchange, symbol: leg1Price.symbol, type: 'spot', side: 'buy' },
+                leg2: { exchange: leg2Price.exchange, symbol: leg2Price.symbol, type: 'spot', side: 'sell' },
+                threshold: threshold,
+                amount: 0,
+                enabled: true,
+                createdAt: Date.now(),
+                lastTriggered: null,
+                totalTriggers: 0
+              } as any;
+            })(),
             leg1Price,
             leg2Price,
             spread,
-            spreadPercent,
+            spreadPercent: spreadPct,
             threshold,
-            shouldTrigger: Math.abs(spreadPercent) >= threshold,
+            shouldTrigger: spreadPct >= threshold,
             timestamp: Date.now(),
             direction: 'leg1_buy_leg2_sell' as 'leg1_buy_leg2_sell' | 'leg1_sell_leg2_buy'
           };
@@ -236,7 +282,7 @@ const ArbitragePage: React.FC = () => {
           // 更新 Redux 狀態
           dispatch(updateOpportunity(opportunity));
           
-          logger.info('收到價格更新', { id, spreadPercent, threshold }, 'ArbitragePage');
+          logger.info('收到價格更新', { id, spreadPercent: spreadPct, threshold }, 'ArbitragePage');
         }
       } catch (error) {
         logger.error('處理價格更新失敗', error, 'ArbitragePage');
@@ -264,8 +310,6 @@ const ArbitragePage: React.FC = () => {
       }
     }, 1000);
     
-    return () => clearTimeout(loadDelay);
-
     // 加載交易所狀態（只有在有連接時才載入）
     if (isConnected) {
       (async () => {
@@ -296,12 +340,11 @@ const ArbitragePage: React.FC = () => {
           return;
         }
         
-        // 只對沒有價格數據的交易對進行HTTP請求
+        // 以本頁面的節流 ref 為準，避免 Redux 閉包造成判斷過期
         for (const pair of pairs) {
-          const existingOpportunity = currentOpportunities.find(o => o.id === pair.id);
-          if (existingOpportunity && existingOpportunity.timestamp > Date.now() - 5000) {
-            // 5秒內有數據，跳過HTTP請求
-            continue;
+          const lastAt = lastUpdateAtRef.current[pair.id] || 0;
+          if (lastAt > Date.now() - 1000) {
+            continue; // 1 秒內已更新過
           }
           
           try {
@@ -335,11 +378,13 @@ const ArbitragePage: React.FC = () => {
                 if (leg1Bid > 0 && leg1Ask > 0 && leg2Bid > 0 && leg2Ask > 0) {
                   const leg1Side = pair.leg1.side || 'buy';
                   const leg2Side = pair.leg2.side || 'sell';
-                  const leg1ExecPrice = leg1Side === 'buy' ? leg1Ask : leg1Bid;
-                  const leg2ExecPrice = leg2Side === 'buy' ? leg2Ask : leg2Bid;
-                  const mid = (leg1ExecPrice + leg2ExecPrice) / 2;
-                  const spread = leg2ExecPrice - leg1ExecPrice;
-                  const spreadPercent = mid > 0 ? (spread / mid) * 100 : 0;
+                const leg1ExecPrice = leg1Side === 'buy' ? leg1Ask : leg1Bid;
+                const leg2ExecPrice = leg2Side === 'buy' ? leg2Ask : leg2Bid;
+                // 以「可套利」定義：sell − buy
+                const sellExec = leg1Side === 'sell' ? leg1ExecPrice : leg2ExecPrice;
+                const buyExec  = leg1Side === 'buy'  ? leg1ExecPrice : leg2ExecPrice;
+                const spread = sellExec - buyExec;
+                const spreadPercent = buyExec > 0 ? (spread / buyExec) * 100 : 0;
                   
                   const opportunity = {
                     id: pair.id,
@@ -371,12 +416,13 @@ const ArbitragePage: React.FC = () => {
                     spread,
                     spreadPercent,
                     threshold: pair.threshold ?? 0.1,
-                    shouldTrigger: Math.abs(spreadPercent) >= (pair.threshold ?? 0.1),
+                    shouldTrigger: spreadPercent >= (pair.threshold ?? 0.1),
                     timestamp: Date.now(),
                     direction: (leg1Side === 'sell' && leg2Side === 'buy') ? 'leg1_sell_leg2_buy' as 'leg1_buy_leg2_sell' | 'leg1_sell_leg2_buy' : 'leg1_buy_leg2_sell' as 'leg1_buy_leg2_sell' | 'leg1_sell_leg2_buy'
                   };
                   
                   dispatch(updateOpportunity(opportunity));
+                  lastUpdateAtRef.current[pair.id] = Date.now();
                 }
               }
             }
@@ -441,16 +487,19 @@ const ArbitragePage: React.FC = () => {
     }
     fetchExecutions();
 
-    // 定期獲取價格數據（只有在有交易對時才輪詢，間隔調整為5秒）
+    // 定期獲取價格數據（只有在有交易對時才輪詢，間隔調整為1秒）
     const priceInterval = setInterval(() => {
       const pairs = monitoringPairsRef.current || [];
-      if (pairs.length > 0 && isConnected) {
+      // 即使 WS 未連線也啟用 HTTP 後備輪詢；
+      // fetchTickerData 內部會檢查 1 秒內是否已有更新，避免浪費請求
+      if (pairs.length > 0) {
         fetchTickerData();
       }
-    }, 5 * 1000); // 調整為 5 秒，與頁面刷新頻率一致
+    }, 1 * 1000); // 調整為 1 秒，更即時
 
     // 清理定時器
     return () => {
+      clearTimeout(loadDelay);
       clearInterval(reloadInterval);
       clearInterval(priceInterval);
     };
@@ -608,8 +657,11 @@ const ArbitragePage: React.FC = () => {
       leg2_symbol: pair.leg2?.symbol || 'BTCUSDT',
       leg2_type: pair.leg2?.type || 'spot',
       leg2_side: pair.leg2?.side || 'sell',
-                    threshold: pair.threshold ?? 0.1,
-      amount: pair.amount || 0,
+      // 保留原本已設定的數值，避免開啟編輯時被預設值覆蓋
+      qty: typeof pair.qty === 'number' ? pair.qty : (typeof pair.amount === 'number' ? pair.amount : undefined),
+      orderCount: typeof pair.maxExecs === 'number' ? pair.maxExecs : (typeof pair.orderCount === 'number' ? pair.orderCount : undefined),
+      threshold: typeof pair.threshold === 'number' ? pair.threshold : 0.1,
+      amount: typeof pair.amount === 'number' ? pair.amount : undefined,
       enabled: pair.enabled ?? true,
       executionMode: pair.executionMode || 'threshold',
     });
@@ -1326,7 +1378,9 @@ const ArbitragePage: React.FC = () => {
       >
         <Table
           size="small"
-          rowKey={(r: any, idx) => `${r.timestamp}_${idx}`}
+          rowKey={(r: any) => (
+            r?.result?.leg1OrderId || r?.result?.leg2OrderId || String(r?.timestamp) || `${r?.opportunity?.id || 'exec'}_${Date.now()}`
+          )}
           dataSource={recentExecutions.filter(r => r && typeof r === 'object')}
           pagination={{ pageSize: 10 }}
           locale={{ emptyText: '暫無執行記錄' }}
@@ -1505,22 +1559,7 @@ const ArbitragePage: React.FC = () => {
                         value={exchange.key}
                         disabled={!exchange.connected && !exchange.implemented}
                       >
-                        <Space>
-                          <span>{exchange.name}</span>
-                          <Tag 
-                            color={
-                              exchange.status === 'active' ? 'green' : 
-                              exchange.status === 'ready' ? 'blue' : 
-                              exchange.status === 'planned' ? 'orange' : 'default'
-                            }
-                          >
-                            {exchange.status === 'active' ? '運行中' : 
-                             exchange.status === 'ready' ? '就緒' : 
-                             exchange.status === 'planned' ? '計劃中' : '未知'}
-                          </Tag>
-                          {!exchange.implemented && <Tag color="red">未實現</Tag>}
-                          {!exchange.connected && exchange.implemented && <Tag color="yellow">未連接</Tag>}
-                        </Space>
+                        <span>{exchange.name}</span>
                       </Option>
                     ))}
                   </Select>
@@ -1588,22 +1627,7 @@ const ArbitragePage: React.FC = () => {
                         value={exchange.key}
                         disabled={!exchange.connected && !exchange.implemented}
                       >
-                        <Space>
-                          <span>{exchange.name}</span>
-                          <Tag 
-                            color={
-                              exchange.status === 'active' ? 'green' : 
-                              exchange.status === 'ready' ? 'blue' : 
-                              exchange.status === 'planned' ? 'orange' : 'default'
-                            }
-                          >
-                            {exchange.status === 'active' ? '運行中' : 
-                             exchange.status === 'ready' ? '就緒' : 
-                             exchange.status === 'planned' ? '計劃中' : '未知'}
-                          </Tag>
-                          {!exchange.implemented && <Tag color="red">未實現</Tag>}
-                          {!exchange.connected && exchange.implemented && <Tag color="yellow">未連接</Tag>}
-                        </Space>
+                        <span>{exchange.name}</span>
                       </Option>
                     ))}
                   </Select>

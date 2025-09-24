@@ -243,14 +243,13 @@ class ArbitrageEngine:
                 leg2_bid = float(leg2_book.get("bids", [[0]])[0][0]) if leg2_book.get("bids") else 0.0
                 leg2_ask = float(leg2_book.get("asks", [[0]])[0][0]) if leg2_book.get("asks") else 0.0
             
-            # 計算價差
-            leg1_exec = leg1_ask if config.leg1.side == "buy" else leg1_bid
-            leg2_exec = leg2_ask if config.leg2.side == "buy" else leg2_bid
-            
-            if leg1_exec > 0 and leg2_exec > 0:
-                base = leg1_exec
-                spread = leg2_exec - leg1_exec
-                spread_pct = (spread / base) * 100.0
+            # 計算「可套利」定義的價差：賣腿可成交價 − 買腿可成交價
+            buy_exec = (config.leg1.side == "buy") and leg1_ask or leg2_ask
+            sell_exec = (config.leg1.side == "sell") and leg1_bid or leg2_bid
+
+            if buy_exec > 0 and sell_exec > 0:
+                spread = sell_exec - buy_exec
+                spread_pct = (spread / buy_exec) * 100.0
                 
                 # 推播價格更新到前端
                 if ws_manager is not None:
@@ -344,19 +343,16 @@ class ArbitrageEngine:
                     leg2_bid = float(leg2_book.get("bids", [[0]])[0][0]) if leg2_book.get("bids") else 0.0
                     leg2_ask = float(leg2_book.get("asks", [[0]])[0][0]) if leg2_book.get("asks") else 0.0
 
-                # 以「買用 ASK、賣用 BID」的邏輯計算
-                leg1_exec = leg1_ask if cfg.leg1.side == "buy" else leg1_bid
-                leg2_exec = leg2_ask if cfg.leg2.side == "buy" else leg2_bid
+                # 計算「可套利」定義的價差：賣腿可成交價 − 買腿可成交價
+                buy_exec = (cfg.leg1.side == "buy") and leg1_ask or leg2_ask
+                sell_exec = (cfg.leg1.side == "sell") and leg1_bid or leg2_bid
 
-                if leg1_exec <= 0 or leg2_exec <= 0:
+                if buy_exec <= 0 or sell_exec <= 0:
                     continue
 
-                # 你指定的基準：spreadPct = (BID - ASK) / ASK * 100
-                # 假設 leg1 為買、leg2 為賣時：使用 (sell_bid - buy_ask)/buy_ask
-                # 通用化：以第一腿作為買入腿基準
-                base = leg1_exec
-                spread = leg2_exec - leg1_exec
-                spread_pct = (spread / base) * 100.0
+                # spreadPct = (sell - buy) / buy * 100
+                spread = sell_exec - buy_exec
+                spread_pct = (spread / buy_exec) * 100.0
 
                 # 只在觸發時才記錄日誌，避免過多輸出
                 # 低頻詳情日誌（僅在有價差且有價時輸出，可協助診斷觸發門檻）
@@ -364,8 +360,8 @@ class ArbitrageEngine:
                     self.logger.info(
                         "arb_tick_brief",
                         pairId=pair_id,
-                        leg1Exec=leg1_exec,
-                        leg2Exec=leg2_exec,
+                        buyExec=buy_exec,
+                        sellExec=sell_exec,
                         spread=spread,
                         spreadPct=spread_pct,
                         threshold=cfg.threshold,
@@ -397,7 +393,7 @@ class ArbitrageEngine:
                 except Exception:
                     pass
 
-                # 觸發邏輯：統一使用 spread >= threshold
+                # 觸發邏輯：統一使用 spreadPct >= threshold（正差價才觸發）
                 # - threshold = 0.0 → 任何正價差都會觸發
                 # - threshold > 0 → 價差 >= 閾值時觸發
                 # - threshold < 0 → 價差 >= 負閾值時觸發（負向套利）
@@ -418,7 +414,7 @@ class ArbitrageEngine:
                     )
                     
                     # 執行自動套利
-                    await self._execute_arbitrage(pair_id, cfg, leg1_exec, leg2_exec)
+                    await self._execute_arbitrage(pair_id, cfg, sell_exec, buy_exec)
             except Exception as e:
                 self.logger.error("arb_tick_error", pairId=pair_id, error=str(e))
 
@@ -494,6 +490,9 @@ class ArbitrageEngine:
             # WebSocket 推播：即時通知前端顯示執行結果
             try:
                 if ws_manager is not None:
+                    # 獲取當前觸發次數
+                    current_triggers = self._executions_count.get(pair_id, 0)
+                    
                     payload = json.dumps({
                         "type": "arbitrageExecuted",
                         "data": {
@@ -502,6 +501,7 @@ class ArbitrageEngine:
                             "leg2OrderId": leg2_result.order_id,
                             "qty": config.qty,
                             "ts": int(time.time() * 1000),
+                            "totalTriggers": current_triggers,
                             "leg1": {
                                 "exchange": config.leg1.exchange,
                                 "symbol": config.leg1.symbol,
@@ -610,7 +610,7 @@ class ArbitrageEngine:
                     qty=quantity,
                 )
             else:
-                # 現貨下單（Bybit 需要 marketUnit，若走槓桿現貨需 isLeverage）
+                # 現貨下單（預設使用非槓桿現貨，不傳 isLeverage 以避免 170344）
                 self.logger.info("arb_placing_spot_order", 
                                symbol=leg.symbol, 
                                side=side, 
@@ -622,8 +622,30 @@ class ArbitrageEngine:
                     orderType="Market",
                     qty=quantity,
                     marketUnit="baseCoin",
-                    isLeverage=1,
                 )
+
+                # 若現貨賣出因餘額不足而失敗，嘗試以現貨槓桿重試（isLeverage=1）
+                try:
+                    ret_code = response.get("retCode")
+                    ret_msg = response.get("retMsg", "")
+                except Exception:
+                    ret_code = None
+                    ret_msg = ""
+
+                if (ret_code and ret_code != 0) and (side == "Sell"):
+                    msg = str(ret_msg)
+                    insufficient = ("170131" in msg) or ("170207" in msg) or ("Insufficient balance" in msg)
+                    if insufficient:
+                        self.logger.warning("arb_spot_sell_retry_with_margin", symbol=leg.symbol, qty=quantity)
+                        response = client.place_order(
+                            category="spot",
+                            symbol=leg.symbol,
+                            isLeverage=1,
+                            side=side,
+                            orderType="Market",
+                            qty=quantity,
+                            marketUnit="baseCoin",
+                        )
 
             if response.get("retCode") == 0:
                 order_id = response.get("result", {}).get("orderId")
@@ -710,6 +732,20 @@ class ArbitrageEngine:
                 asyncio.create_task(ws_manager.broadcast(payload))
         except Exception:
             pass
+
+        # 發生錯誤後，立即移除該監控對並通知前端
+        try:
+            self.remove_pair(pair_id)
+            if ws_manager is not None:
+                payload = json.dumps({
+                    "type": "pairRemoved",
+                    "data": {"id": pair_id}
+                })
+                import asyncio
+                asyncio.create_task(ws_manager.broadcast(payload))
+            self.logger.info("arb_pair_removed_due_to_error", pairId=pair_id)
+        except Exception as e:
+            self.logger.error("arb_remove_pair_on_error_failed", pairId=pair_id, error=str(e))
 
 
 # 全域引擎實例

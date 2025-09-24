@@ -196,18 +196,30 @@ class TWAPEngine:
                 error_message=f"借貸錯誤處理失敗: {str(e)}"
             )
 
-    def _place_spot_order(self, symbol: str, quantity: str, side: str, isLeverage: int = 1, price: Optional[str] = None) -> OrderResult:
+    def _place_spot_order(self, symbol: str, quantity: str, side: str, isLeverage: int = 0, price: Optional[str] = None) -> OrderResult:
         """下現貨訂單（帶智能錯誤處理和自動重試）"""
         try:
-            response = self.spot_client.place_order(
-                category="spot",
-                symbol=symbol,
-                isLeverage=isLeverage,
-                side=side,
-                orderType="Market",
-                qty=quantity,
-                marketUnit="baseCoin"
-            )
+            # 預設使用非槓桿現貨：不傳 isLeverage 參數，避免 170344（現貨不支援保證金）
+            # 僅當呼叫端明確要求槓桿現貨且該幣種支援時，再加上 isLeverage=1
+            if isLeverage == 1:
+                response = self.spot_client.place_order(
+                    category="spot",
+                    symbol=symbol,
+                    isLeverage=1,
+                    side=side,
+                    orderType="Market",
+                    qty=quantity,
+                    marketUnit="baseCoin"
+                )
+            else:
+                response = self.spot_client.place_order(
+                    category="spot",
+                    symbol=symbol,
+                    side=side,
+                    orderType="Market",
+                    qty=quantity,
+                    marketUnit="baseCoin"
+                )
             
             if response['retCode'] == 0:
                 return OrderResult(
@@ -231,6 +243,10 @@ class TWAPEngine:
                         order_id=None,
                         error_message=error_msg
                     )
+                elif 'ErrCode: 170344' in response['retMsg']:
+                    # 該交易對不支援現貨保證金，改用非槓桿現貨重試一次
+                    self.logger.warning("spot_unsupported_margin_switch_to_cash", symbol=symbol)
+                    return self._place_spot_order(symbol, quantity, side, isLeverage=0, price=price)
                 else:
                     return OrderResult(
                         success=False,
@@ -254,6 +270,10 @@ class TWAPEngine:
                     order_id=None,
                     error_message=error_msg
                 )
+            elif 'ErrCode: 170344' in str(e):
+                # 不支援現貨保證金（如 OMNIUSDT），改用非槓桿現貨重試
+                self.logger.warning("spot_unsupported_margin_exception_switch_to_cash", symbol=symbol)
+                return self._place_spot_order(symbol, quantity, side, isLeverage=0, price=price)
             else:
                 return OrderResult(
                     success=False,
@@ -484,7 +504,7 @@ class TWAPEngine:
                             symbol=leg.symbol,
                             quantity=str(plan.sliceQty),
                             side=reverse_side,
-                            isLeverage=1
+                            isLeverage=0
                         )
                     else:
                         rollback_result = self._place_perp_order(
@@ -575,7 +595,7 @@ class TWAPEngine:
                                 symbol=leg.symbol,
                                 quantity=str(plan.sliceQty),
                                 side="Buy" if leg.side == "buy" else "Sell",
-                                isLeverage=1
+                                isLeverage=0
                             )
                         else:
                             order_result = self._place_perp_order(
