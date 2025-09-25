@@ -119,10 +119,24 @@ class ArbitrageEngine:
         # 新增監控對後立即刷新價格數據
         asyncio.create_task(self._refresh_pair_prices(pair_id, config))
 
-    def remove_pair(self, pair_id: str) -> None:
+    def remove_pair(self, pair_id: str, reason: str = "manual") -> None:
         if pair_id in self._pairs:
             del self._pairs[pair_id]
-            self.logger.info("arb_pair_removed", pairId=pair_id)
+            self.logger.info("arb_pair_removed", pairId=pair_id, reason=reason)
+            # 紀錄到歷史：已取消/移除
+            try:
+                history = self._executions_history.setdefault(pair_id, [])
+                history.append({
+                    "ts": int(time.time() * 1000),
+                    "pairId": pair_id,
+                    "status": "cancelled" if reason == "manual" else reason,
+                    "success": False if reason != "completed" else True,
+                    "reason": reason,
+                    "leg1": None,
+                    "leg2": None
+                })
+            except Exception:
+                pass
         # 清理執行鎖與計數
         self._executions_count.pop(pair_id, None)
         if pair_id in self._executing_pairs:
@@ -464,6 +478,13 @@ class ArbitrageEngine:
                 update_pair_trigger_stats(pair_id, success=True)
             except Exception as e:
                 self.logger.error("arb_update_trigger_stats_failed", pairId=pair_id, error=str(e))
+            
+            # 獲取最新的觸發次數（確保與監控對統計同步）
+            try:
+                from ..api.routes_monitoring import monitoring_pairs
+                current_triggers = monitoring_pairs.get(pair_id, {}).get('totalTriggers', 0)
+            except:
+                current_triggers = self._executions_count.get(pair_id, 0)
 
             # 記錄到執行歷史
             history = self._executions_history.setdefault(pair_id, [])
@@ -471,6 +492,7 @@ class ArbitrageEngine:
                 "ts": int(time.time() * 1000),
                 "pairId": pair_id,
                 "qty": config.qty,
+                "status": "success",
                 "leg1": {
                     "exchange": config.leg1.exchange,
                     "symbol": config.leg1.symbol,
@@ -490,8 +512,6 @@ class ArbitrageEngine:
             # WebSocket 推播：即時通知前端顯示執行結果
             try:
                 if ws_manager is not None:
-                    # 獲取當前觸發次數
-                    current_triggers = self._executions_count.get(pair_id, 0)
                     
                     payload = json.dumps({
                         "type": "arbitrageExecuted",
@@ -610,7 +630,7 @@ class ArbitrageEngine:
                     qty=quantity,
                 )
             else:
-                # 現貨下單（預設使用非槓桿現貨，不傳 isLeverage 以避免 170344）
+                # 現貨下單（預設使用槓桿現貨 isLeverage=1；若 170344 不支援，回退到現金現貨）
                 self.logger.info("arb_placing_spot_order", 
                                symbol=leg.symbol, 
                                side=side, 
@@ -618,13 +638,14 @@ class ArbitrageEngine:
                 response = client.place_order(
                     category="spot",
                     symbol=leg.symbol,
+                    isLeverage=1,
                     side=side,
                     orderType="Market",
                     qty=quantity,
                     marketUnit="baseCoin",
                 )
 
-                # 若現貨賣出因餘額不足而失敗，嘗試以現貨槓桿重試（isLeverage=1）
+                # 若該幣不支援槓桿（170344），回退為現金現貨
                 try:
                     ret_code = response.get("retCode")
                     ret_msg = response.get("retMsg", "")
@@ -632,20 +653,16 @@ class ArbitrageEngine:
                     ret_code = None
                     ret_msg = ""
 
-                if (ret_code and ret_code != 0) and (side == "Sell"):
-                    msg = str(ret_msg)
-                    insufficient = ("170131" in msg) or ("170207" in msg) or ("Insufficient balance" in msg)
-                    if insufficient:
-                        self.logger.warning("arb_spot_sell_retry_with_margin", symbol=leg.symbol, qty=quantity)
-                        response = client.place_order(
-                            category="spot",
-                            symbol=leg.symbol,
-                            isLeverage=1,
-                            side=side,
-                            orderType="Market",
-                            qty=quantity,
-                            marketUnit="baseCoin",
-                        )
+                if (ret_code and ret_code != 0) and ("170344" in str(ret_msg)):
+                    self.logger.warning("arb_spot_retry_cash_when_margin_unsupported", symbol=leg.symbol, qty=quantity)
+                    response = client.place_order(
+                        category="spot",
+                        symbol=leg.symbol,
+                        side=side,
+                        orderType="Market",
+                        qty=quantity,
+                        marketUnit="baseCoin",
+                    )
 
             if response.get("retCode") == 0:
                 order_id = response.get("result", {}).get("orderId")
@@ -656,7 +673,40 @@ class ArbitrageEngine:
                 return OrderResult(success=False, price=None, order_id=None, error_message=error_msg)
 
         except Exception as e:
-            return OrderResult(success=False, price=None, order_id=None, error_message=str(e))
+            # 例外重試：現貨賣出餘額不足 → 改用槓桿現貨 isLeverage=1 再試一次
+            try:
+                err_msg = str(e)
+                if ('170131' in err_msg or 'Insufficient balance' in err_msg) and (leg.type == 'spot'):
+                    # 僅在賣出現貨時嘗試槓桿
+                    if side == 'Sell':
+                        self.logger.warning("arb_spot_sell_exception_retry_with_margin", symbol=leg.symbol, qty=quantity, error=err_msg)
+                        try:
+                            retry_resp = client.place_order(
+                                category="spot",
+                                symbol=leg.symbol,
+                                isLeverage=1,
+                                side=side,
+                                orderType="Market",
+                                qty=quantity,
+                                marketUnit="baseCoin",
+                            )
+                            if retry_resp.get('retCode') == 0:
+                                order_id = retry_resp.get('result', {}).get('orderId')
+                                return OrderResult(success=True, price=None, order_id=order_id)
+                            # 若返回不支援槓桿
+                            retry_msg = retry_resp.get('retMsg', '')
+                            if '170344' in retry_msg:
+                                return OrderResult(success=False, price=None, order_id=None, error_message=f"Spot margin unsupported for {leg.symbol}: {retry_msg}")
+                            return OrderResult(success=False, price=None, order_id=None, error_message=retry_msg or err_msg)
+                        except Exception as re:
+                            re_msg = str(re)
+                            if '170344' in re_msg:
+                                return OrderResult(success=False, price=None, order_id=None, error_message=f"Spot margin unsupported for {leg.symbol}: {re_msg}")
+                            return OrderResult(success=False, price=None, order_id=None, error_message=re_msg)
+                # 其他錯誤：直接回傳
+                return OrderResult(success=False, price=None, order_id=None, error_message=err_msg)
+            except Exception as ee:
+                return OrderResult(success=False, price=None, order_id=None, error_message=str(ee))
 
     async def _rollback_order(self, leg: Leg, qty: float, original_order_id: str) -> bool:
         """回滾訂單（執行反向操作）"""
@@ -703,6 +753,7 @@ class ArbitrageEngine:
             "ts": int(time.time() * 1000),
             "pairId": pair_id,
             "success": False,
+            "status": "failed",
             "reason": reason,
             "error": error_message,
             "leg1": None,

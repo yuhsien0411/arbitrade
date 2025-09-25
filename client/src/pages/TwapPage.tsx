@@ -422,9 +422,9 @@ const TwapPage: React.FC = () => {
     if (strategy.status === 'completed') {
       return 100;
     }
-    // 計算已完成的執行次數（每次執行包含兩個腿）
-    const completedExecutions = Math.floor((strategy.executedOrders || 0) / 2);
-    return strategy.orderCount > 0 ? (completedExecutions / strategy.orderCount) * 100 : 0;
+    // 以 slice 為單位的完成度（executedOrders 即 slicesDone）
+    const completedSlices = Math.max(0, strategy.executedOrders || 0);
+    return strategy.orderCount > 0 ? (completedSlices / strategy.orderCount) * 100 : 0;
   };
 
   // 格式化時間間隔
@@ -440,7 +440,7 @@ const TwapPage: React.FC = () => {
     {
       title: 'Leg 1',
       key: 'leg1',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         if (!record.leg1) {
           return <Text type="secondary">數據載入中...</Text>;
         }
@@ -460,7 +460,7 @@ const TwapPage: React.FC = () => {
     {
       title: 'Leg 2',
       key: 'leg2',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         if (!record.leg2) {
           return <Text type="secondary">數據載入中...</Text>;
         }
@@ -480,7 +480,7 @@ const TwapPage: React.FC = () => {
     {
       title: '總數量',
       key: 'totalAmount',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         // 使用 leg1 的交易對符號來確定幣種
         const symbol = record.leg1?.symbol || record.leg2?.symbol || 'BTCUSDT';
         return formatAmountWithCurrency(record.totalAmount, symbol);
@@ -489,7 +489,7 @@ const TwapPage: React.FC = () => {
     {
       title: '執行進度',
       key: 'progress',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         const progress = getProgress(record);
         return (
           <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -499,7 +499,7 @@ const TwapPage: React.FC = () => {
               status={record.status === 'completed' ? 'success' : 'active'}
             />
             <Text style={{ fontSize: '12px' }}>
-              {Math.floor((record.executedOrders || 0) / 2)}/{record.orderCount} 次
+              {Math.max(0, record.executedOrders || 0)}/{record.orderCount} 次
             </Text>
           </Space>
         );
@@ -508,12 +508,12 @@ const TwapPage: React.FC = () => {
     {
       title: '時間間隔',
       key: 'timeInterval',
-      render: (record: any) => formatTimeInterval(record.timeInterval),
+      render: (_: any, record: any) => formatTimeInterval(record.timeInterval),
     },
     {
       title: '剩餘數量',
       key: 'remainingAmount',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         // 使用 leg1 的交易對符號來確定幣種
         const symbol = record.leg1?.symbol || record.leg2?.symbol || 'BTCUSDT';
         // 確保剩餘數量不會顯示負數
@@ -524,7 +524,7 @@ const TwapPage: React.FC = () => {
     {
       title: '狀態',
       key: 'status',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         const statusMap: Record<string, { color: string; text: string }> = {
           active: { color: 'processing', text: '執行中' },
           paused: { color: 'warning', text: '已暫停' },
@@ -551,7 +551,7 @@ const TwapPage: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      render: (record: any) => (
+      render: (_: any, record: any) => (
         <Space>
           {record.status === 'pending' && (
             <Tooltip title="啟動">
@@ -646,7 +646,7 @@ const TwapPage: React.FC = () => {
     {
       title: '時間',
       key: 'timestamp',
-      render: (record: any) => new Date(record.timestamp).toLocaleString(),
+      render: (_: any, record: any) => new Date(record.timestamp).toLocaleString(),
     },
     {
       title: '策略ID',
@@ -657,7 +657,7 @@ const TwapPage: React.FC = () => {
     {
       title: '執行類型',
       key: 'type',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         if (record.executionType) {
           // 策略級別的執行類型
           const colorMap: Record<string, string> = {
@@ -684,7 +684,7 @@ const TwapPage: React.FC = () => {
     {
       title: '數量',
       key: 'amount',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         // 從策略中獲取交易對符號
         const strategy = strategies.find(s => s.id === record.strategyId);
         const symbol = strategy?.leg1?.symbol || 'BTCUSDT';
@@ -696,7 +696,7 @@ const TwapPage: React.FC = () => {
     {
       title: '執行價格',
       key: 'prices',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         const isCompleted = record.orderId?.startsWith('completed_');
         if (isCompleted) {
           // 依方向著色：買入=綠色、賣出=紅色
@@ -732,7 +732,7 @@ const TwapPage: React.FC = () => {
     {
       title: '狀態',
       key: 'success',
-      render: (record: any) => {
+      render: (_: any, record: any) => {
         if (record.executionType) {
           // 策略級別的狀態
           const colorMap: Record<string, string> = {

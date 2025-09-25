@@ -8,6 +8,7 @@ from typing import Literal, Optional
 from app.services.arbitrage_engine import arb_engine
 from app.services.twap_engine import twap_engine
 from app.api.routes_monitoring import clear_monitoring_data
+from app.api.routes_monitoring import monitoring_pairs
 from app.services.arbitrage_engine import PairConfig, Leg
 from app.utils.logger import get_logger
 
@@ -43,6 +44,10 @@ async def get_arbitrage_pairs():
     try:
         pairs = []
         for pair_id, config in arb_engine._pairs.items():
+            # 從監控對統計帶出觸發資料，避免前端顯示為 0
+            mp = monitoring_pairs.get(pair_id, {})
+            total_triggers = mp.get('totalTriggers', 0)
+            last_triggered = mp.get('lastTriggered', None)
             pair_data = {
                 "id": pair_id,
                 "leg1": {
@@ -61,7 +66,9 @@ async def get_arbitrage_pairs():
                 "qty": config.qty,
                 "enabled": config.enabled,
                 "maxExecs": config.max_execs,
-                "executionsCount": arb_engine._executions_count.get(pair_id, 0)
+                "executionsCount": arb_engine._executions_count.get(pair_id, 0),
+                "totalTriggers": total_triggers,
+                "lastTriggered": last_triggered,
             }
             pairs.append(pair_data)
         return {"success": True, "data": pairs}
@@ -117,7 +124,10 @@ async def upsert_pair(req: UpsertPairRequest):
             except Exception as e:
                 logger.error("arb_engine_autostart_failed", pairId=req.pairId, error=str(e))
         
-        # 返回完整的交易對數據供前端使用
+        # 返回完整的交易對數據供前端使用（包含觸發統計）
+        mp = monitoring_pairs.get(req.pairId, {})
+        total_triggers = mp.get('totalTriggers', 0)
+        last_triggered = mp.get('lastTriggered', None)
         pair_data = {
             "id": req.pairId,
             "leg1": {
@@ -138,8 +148,8 @@ async def upsert_pair(req: UpsertPairRequest):
             "maxExecs": cfg.max_execs,
             "executionsCount": arb_engine._executions_count.get(req.pairId, 0),
             "createdAt": int(time.time() * 1000),
-            "lastTriggered": None,
-            "totalTriggers": 0
+            "lastTriggered": last_triggered,
+            "totalTriggers": total_triggers,
         }
         
         return {"success": True, "data": pair_data}

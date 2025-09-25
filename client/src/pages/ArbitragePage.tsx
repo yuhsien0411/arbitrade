@@ -70,12 +70,8 @@ const ArbitragePage: React.FC = () => {
   const monitoringPairsRef = useRef<ArbitragePairExtended[]>(monitoringPairs);
   useEffect(() => { monitoringPairsRef.current = monitoringPairs; }, [monitoringPairs]);
 
-  // 最近一次已渲染的價格快照，用於跳過無變化的更新，降低閃爍
-  const lastSnapshotRef = useRef<Record<string, { l1b: number; l1a: number; l2b: number; l2a: number }>>({});
   // 更新節流：對齊 bybit 的穩定感，每個 pair 最快 1s 更新一次
   const lastUpdateAtRef = useRef<Record<string, number>>({});
-  // 上一次有效價，用於 UI 顯示回退（避免顯示 '-')
-  const lastGoodPriceRef = useRef<Record<string, { l1b: number; l1a: number; l2b: number; l2a: number }>>({});
   
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -440,15 +436,35 @@ const ArbitragePage: React.FC = () => {
       try {
         const res = await apiService.getArbitrageExecutions();
         const hist = (res as any)?.data || {};
-                Object.values(hist || {}).forEach((list: any) => {
-                  (list as any[]).forEach((item) => {
+        // 聚合每個 pair 的成功次數與最後時間
+        const agg: Record<string, { total: number; lastTs: number }> = {};
+        Object.values(hist || {}).forEach((list: any) => {
+          (list as any[]).forEach((item) => {
                     // 安全檢查：確保 item 和其屬性存在
                     if (!item || !item.leg1 || !item.leg2) return;
+            const pid = item.pairId || 'unknown';
+            const pair = (monitoringPairsRef.current || []).find(p => p.id === pid);
                     
                     dispatch(addExecution({
                       opportunity: {
-                        id: item.pairId || 'unknown',
-                        pairConfig: undefined as any,
+                id: pid,
+                // 直接以歷史記錄的腿資訊為主，確保 type/side 正確
+                pairConfig: ({
+                  id: pid,
+                  leg1: {
+                    exchange: item.leg1?.exchange || pair?.leg1?.exchange,
+                    symbol: item.leg1?.symbol || pair?.leg1?.symbol,
+                    type: item.leg1?.type || pair?.leg1?.type || 'spot',
+                    side: item.leg1?.side || pair?.leg1?.side || 'buy'
+                  },
+                  leg2: {
+                    exchange: item.leg2?.exchange || pair?.leg2?.exchange,
+                    symbol: item.leg2?.symbol || pair?.leg2?.symbol,
+                    type: item.leg2?.type || pair?.leg2?.type || 'spot',
+                    side: item.leg2?.side || pair?.leg2?.side || 'sell'
+                  },
+                  qty: Number.isFinite(Number(item.qty)) ? Number(item.qty) : (pair?.qty)
+                } as any),
                         leg1Price: { 
                           symbol: item.leg1?.symbol || 'N/A', 
                           exchange: item.leg1?.exchange || 'N/A', 
@@ -465,18 +481,36 @@ const ArbitragePage: React.FC = () => {
                         spreadPercent: 0,
                         threshold: 0,
                         shouldTrigger: false,
+                        status: (item.success === false ? 'failed' : (item.status || 'success')),
                         timestamp: item.ts || Date.now(),
                         direction: 'leg1_buy_leg2_sell' as 'leg1_buy_leg2_sell' | 'leg1_sell_leg2_buy'
                       },
+                      // 於記錄層級也保留數量
+                      amount: (Number.isFinite(Number(item.qty)) ? Number(item.qty) : undefined) as any,
                       result: {
                         leg1OrderId: item.leg1?.orderId || 'N/A',
                         leg2OrderId: item.leg2?.orderId || 'N/A'
                       },
-                      success: true,
+                      success: item.success !== false,
                       timestamp: item.ts || Date.now()
                     } as any));
+
+            // 聚合成功次數（歷史接口默認為成功記錄）
+            const ts = item.ts || Date.now();
+            if (!agg[pid]) agg[pid] = { total: 0, lastTs: 0 };
+            agg[pid].total += 1;
+            agg[pid].lastTs = Math.max(agg[pid].lastTs, ts);
                   });
-                });
+        });
+
+        // 將聚合結果同步到觸發統計，讓進度顯示正確
+        Object.entries(agg).forEach(([pairId, v]) => {
+          dispatch(updatePairTriggerStats({
+            pairId,
+            totalTriggers: v.total,
+            lastTriggered: v.lastTs || null
+          }));
+        });
       } catch {}
     };
 
@@ -1305,37 +1339,36 @@ const ArbitragePage: React.FC = () => {
                 const hist = (res as any)?.data || {};
                 // 將後端歷史轉為標準結構並覆蓋最近執行記錄，避免每次刷新累加
                 const merged: any[] = [];
+                const agg: Record<string, { total: number; lastTs: number }> = {};
                 Object.values(hist || {}).forEach((list: any) => {
                   if (!Array.isArray(list)) return;
                   (list as any[]).forEach((item) => {
                     // 安全檢查：確保 item 和其屬性存在
                     if (!item || typeof item !== 'object') return;
                     if (!item.leg1 || !item.leg2 || typeof item.leg1 !== 'object' || typeof item.leg2 !== 'object') return;
+                    const pid = item.pairId || 'unknown';
+                    const pair = (monitoringPairsRef.current || []).find(p => p.id === pid);
                     
                     merged.push({
                       opportunity: {
-                        id: item.pairId || 'unknown',
-                        pairConfig: {
-                          id: item.pairId || 'unknown',
+                        id: pid,
+                        // 以歷史腿資訊為主
+                        pairConfig: ({
+                          id: pid,
                           leg1: {
-                            exchange: item.leg1?.exchange || 'N/A',
-                            symbol: item.leg1?.symbol || 'N/A',
-                            type: 'linear' as 'linear' | 'inverse' | 'spot' | 'future',
-                            side: 'buy' as 'buy' | 'sell'
+                            exchange: item.leg1?.exchange || pair?.leg1?.exchange,
+                            symbol: item.leg1?.symbol || pair?.leg1?.symbol,
+                            type: item.leg1?.type || pair?.leg1?.type || 'spot',
+                            side: item.leg1?.side || pair?.leg1?.side || 'buy'
                           },
                           leg2: {
-                            exchange: item.leg2?.exchange || 'N/A',
-                            symbol: item.leg2?.symbol || 'N/A',
-                            type: 'spot' as 'linear' | 'inverse' | 'spot' | 'future',
-                            side: 'sell' as 'buy' | 'sell'
+                            exchange: item.leg2?.exchange || pair?.leg2?.exchange,
+                            symbol: item.leg2?.symbol || pair?.leg2?.symbol,
+                            type: item.leg2?.type || pair?.leg2?.type || 'spot',
+                            side: item.leg2?.side || pair?.leg2?.side || 'sell'
                           },
-                          threshold: 0,
-                          amount: 0,
-                          enabled: true,
-                          createdAt: item.ts || Date.now(),
-                          lastTriggered: null,
-                          totalTriggers: 0
-                        },
+                          qty: Number.isFinite(Number(item.qty)) ? Number(item.qty) : (pair?.qty)
+                        } as any),
                         leg1Price: { 
                           symbol: item.leg1?.symbol || 'N/A', 
                           exchange: item.leg1?.exchange || 'N/A', 
@@ -1352,6 +1385,7 @@ const ArbitragePage: React.FC = () => {
                         spreadPercent: 0,
                         threshold: 0,
                         shouldTrigger: false,
+                        status: (item.success === false ? 'failed' : (item.status || 'success')),
                         timestamp: item.ts || Date.now(),
                         direction: 'leg1_buy_leg2_sell' as 'leg1_buy_leg2_sell' | 'leg1_sell_leg2_buy'
                       },
@@ -1359,14 +1393,31 @@ const ArbitragePage: React.FC = () => {
                         leg1OrderId: item.leg1?.orderId || 'N/A', 
                         leg2OrderId: item.leg2?.orderId || 'N/A' 
                       },
-                      success: true,
+                      // 直接在記錄層級保留 qty，供表格顯示
+                      amount: (Number.isFinite(Number(item.qty)) ? Number(item.qty) : undefined) as any,
+                      success: item.success !== false,
                       timestamp: item.ts || Date.now()
                     });
+
+                    // 聚合成功次數
+                    const ts = item.ts || Date.now();
+                    if (!agg[pid]) agg[pid] = { total: 0, lastTs: 0 };
+                    agg[pid].total += 1;
+                    agg[pid].lastTs = Math.max(agg[pid].lastTs, ts);
                   });
                 });
                 // 依時間由新到舊排序，並覆蓋到recentExecutions
                 merged.sort((a, b) => b.timestamp - a.timestamp);
                 dispatch(setRecentExecutions(merged as any));
+
+                // 同步聚合計數給觸發統計
+                Object.entries(agg).forEach(([pairId, v]) => {
+                  dispatch(updatePairTriggerStats({
+                    pairId,
+                    totalTriggers: v.total,
+                    lastTriggered: v.lastTs || null
+                  }));
+                });
               } catch (error) {
                 console.error('刷新執行記錄失敗:', error);
               }
@@ -1378,10 +1429,69 @@ const ArbitragePage: React.FC = () => {
       >
         <Table
           size="small"
-          rowKey={(r: any) => (
-            r?.result?.leg1OrderId || r?.result?.leg2OrderId || String(r?.timestamp) || `${r?.opportunity?.id || 'exec'}_${Date.now()}`
-          )}
-          dataSource={recentExecutions.filter(r => r && typeof r === 'object')}
+          rowKey={(r: any) => r?.pairId || String(r?.timestamp) }
+          dataSource={
+            (monitoringPairs && monitoringPairs.length > 0)
+              ? (monitoringPairs || []).map((p: any) => ({
+                  pairId: p.id,
+                  timestamp: p.lastTriggered || null,
+                  leg1Symbol: p?.leg1?.symbol || '-',
+                  leg2Symbol: p?.leg2?.symbol || '-',
+                  leg1Exchange: p?.leg1?.exchange || '-',
+                  leg2Exchange: p?.leg2?.exchange || '-',
+                  leg1Type: p?.leg1?.type || 'spot',
+                  leg2Type: p?.leg2?.type || 'spot',
+                  leg1Side: p?.leg1?.side || 'buy',
+                  leg2Side: p?.leg2?.side || 'sell',
+                  qty: (Number.isFinite(Number(p?.qty)) ? Number(p?.qty) : (Number.isFinite(Number(p?.amount)) ? Number(p?.amount) : '-')),
+                  totalTriggers: p?.totalTriggers ?? 0,
+                  maxExecs: p?.maxExecs,
+                  enabled: p?.enabled !== false,
+                  completed: (typeof p?.maxExecs === 'number') && (p?.totalTriggers >= p?.maxExecs)
+                }))
+              : (() => {
+                  // 後備：若監控清單為空，從最近執行記錄聚合每個 pair 的統計
+                  const agg: Record<string, any> = {};
+                  (recentExecutions || []).forEach((r: any) => {
+                    const pid = r?.opportunity?.id;
+                    if (!pid) return;
+                    const dir = String(r?.opportunity?.direction || '').toLowerCase();
+                    const dirL1Sell = dir === 'leg1_sell_leg2_buy';
+                    const derivedLeg1Side = dirL1Sell ? 'sell' : 'buy';
+                    const derivedLeg2Side = dirL1Sell ? 'buy' : 'sell';
+                    if (!agg[pid]) {
+                      agg[pid] = {
+                        pairId: pid,
+                        timestamp: r?.timestamp || null,
+                        leg1Symbol: r?.opportunity?.leg1Price?.symbol || '-',
+                        leg2Symbol: r?.opportunity?.leg2Price?.symbol || '-',
+                        leg1Exchange: r?.opportunity?.pairConfig?.leg1?.exchange || r?.opportunity?.leg1Price?.exchange || '-',
+                        leg2Exchange: r?.opportunity?.pairConfig?.leg2?.exchange || r?.opportunity?.leg2Price?.exchange || '-',
+                        leg1Type: r?.opportunity?.pairConfig?.leg1?.type || 'spot',
+                        leg2Type: r?.opportunity?.pairConfig?.leg2?.type || 'spot',
+                        leg1Side: String(r?.opportunity?.pairConfig?.leg1?.side || derivedLeg1Side).toLowerCase(),
+                        leg2Side: String(r?.opportunity?.pairConfig?.leg2?.side || derivedLeg2Side).toLowerCase(),
+                        qty: (Number.isFinite(Number(r?.opportunity?.pairConfig?.qty)) ? Number(r?.opportunity?.pairConfig?.qty) : (Number.isFinite(Number(r?.amount)) ? Number(r?.amount) : '-')),
+                        totalTriggers: 0,
+                        maxExecs: undefined,
+                        enabled: false,
+                        completed: false
+                      };
+                    }
+                    agg[pid].totalTriggers += (r?.success ? 1 : 0);
+                    agg[pid].timestamp = Math.max(agg[pid].timestamp || 0, r?.timestamp || 0);
+                    if ((agg[pid].qty === '-' || agg[pid].qty === undefined) && (r?.opportunity?.pairConfig?.qty || r?.amount)) {
+                      const v = Number.isFinite(Number(r?.opportunity?.pairConfig?.qty)) ? Number(r?.opportunity?.pairConfig?.qty) : Number(r?.amount);
+                      if (Number.isFinite(v)) agg[pid].qty = v;
+                    }
+                  });
+                  Object.values(agg).forEach((row: any) => {
+                    row.maxExecs = row.totalTriggers;
+                    row.completed = true;
+                  });
+                  return Object.values(agg);
+                })()
+          }
           pagination={{ pageSize: 10 }}
           locale={{ emptyText: '暫無執行記錄' }}
           columns={[
@@ -1394,75 +1504,72 @@ const ArbitragePage: React.FC = () => {
             {
               title: '交易對',
               key: 'pair',
-              render: (r: any) => {
-                try {
-                  // 安全檢查 opportunity 對象
-                  if (!r || !r.opportunity || typeof r.opportunity !== 'object') {
-                    return <Text type="secondary">數據不完整</Text>;
-                  }
-                  
-                  const leg1Sym = r.opportunity.leg1Price?.symbol || '-';
-                  const leg2Sym = r.opportunity.leg2Price?.symbol || '-';
-                  const id = r.opportunity.id || '-';
-                  return (
-                    <Space direction="vertical" size={0}>
-                      <Text>{leg1Sym} / {leg2Sym}</Text>
-                      <Text type="secondary" style={{ fontSize: 12 }}>{id}</Text>
+              render: (_: any, r: any) => {
+                const leg1Sym = r?.leg1Symbol || '-';
+                const leg2Sym = r?.leg2Symbol || '-';
+                const leg1Ex = r?.leg1Exchange || '-';
+                const leg2Ex = r?.leg2Exchange || '-';
+                const leg1Type = r?.leg1Type || 'spot';
+                const leg2Type = r?.leg2Type || 'spot';
+                const leg1Side = r?.leg1Side || 'buy';
+                const leg2Side = r?.leg2Side || 'sell';
+                const colorFor = (side: string) => (side === 'buy' ? '#52c41a' : '#ff4d4f');
+                const typeLabel = (t: string) => (String(t || '').toLowerCase() === 'linear' || String(t || '').toLowerCase() === 'future') ? 'perp' : 'spot';
+                return (
+                  <div style={{ display: 'flex', gap: 24 }}>
+                    <Space size={4}>
+                      <Tag color="blue">Leg1</Tag>
+                      <Tag>{typeLabel(leg1Type)}</Tag>
+                      <Text>{leg1Ex}</Text>
+                      <Text strong>{leg1Sym}</Text>
+                      <Text style={{ color: colorFor(leg1Side) }}>{leg1Side === 'buy' ? '買' : '賣'}</Text>
                     </Space>
-                  );
-                } catch (error) {
-                  console.error('交易對渲染錯誤:', error, r);
-                  return <Text type="secondary">渲染錯誤</Text>;
-                }
+                    <Space size={4}>
+                      <Tag color="purple">Leg2</Tag>
+                      <Tag>{typeLabel(leg2Type)}</Tag>
+                      <Text>{leg2Ex}</Text>
+                      <Text strong>{leg2Sym}</Text>
+                      <Text style={{ color: colorFor(leg2Side) }}>{leg2Side === 'buy' ? '買' : '賣'}</Text>
+                    </Space>
+                  </div>
+                );
               }
             },
             {
               title: '數量',
               key: 'qty',
-              render: (r: any) => {
-                try {
-                  if (!r || !r.opportunity) return '-';
-                  return r.opportunity.pairConfig?.qty || r.amount || '-';
-                } catch (error) {
-                  return '-';
-                }
+              render: (_: any, r: any) => {
+                return (typeof r?.qty === 'number') ? r.qty : (r?.qty || '-');
               }
             },
             {
-              title: 'Leg1 訂單',
-              key: 'leg1',
-              render: (r: any) => {
-                try {
-                  if (!r || !r.result) return '-';
-                  return r.result.leg1OrderId || '-';
-                } catch (error) {
-                  return '-';
-                }
-              }
-            },
-            {
-              title: 'Leg2 訂單',
-              key: 'leg2',
-              render: (r: any) => {
-                try {
-                  if (!r || !r.result) return '-';
-                  return r.result.leg2OrderId || '-';
-                } catch (error) {
-                  return '-';
-                }
+              title: '進度',
+              key: 'progress',
+              render: (_: any, r: any) => {
+                const done = typeof r?.totalTriggers === 'number' ? r.totalTriggers : 0;
+                const total = typeof r?.maxExecs === 'number' ? r.maxExecs : undefined;
+                return total ? `${Math.min(done, total)}/${total}` : `${done}`;
               }
             },
             {
               title: '狀態',
               key: 'status',
-              render: (r: any) => {
-                try {
-                  if (!r || typeof r.success !== 'boolean') return <Tag color="default">未知</Tag>;
-                  return <Tag color={r.success ? 'green' : 'red'}>{r.success ? '成功' : '失敗'}</Tag>;
-                } catch (error) {
-                  return <Tag color="default">錯誤</Tag>;
-                }
+              render: (_: any, r: any) => {
+                const status = (r?.status || '').toLowerCase();
+                const isCompleted = !!r?.completed || (typeof r?.maxExecs === 'number' && r?.totalTriggers >= r?.maxExecs);
+                if (status === 'failed') return <Tag color="error">失敗</Tag>;
+                if (status === 'cancelled') return <Tag color="default">已取消</Tag>;
+                if (status === 'rolling_back') return <Tag color="orange">回滾中</Tag>;
+                if (status === 'rolled_back') return <Tag color="warning">已回滾</Tag>;
+                if (isCompleted) return <Tag color="success">完成</Tag>;
+                return <Tag color={r?.enabled ? 'processing' : 'default'}>{r?.enabled ? '監控中' : '已停用'}</Tag>;
               }
+            },
+            {
+              title: 'ID',
+              key: 'id',
+              render: (_: any, r: any) => r?.pairId || '-',
+              width: 220
             }
           ]}
         />
