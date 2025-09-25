@@ -350,7 +350,7 @@ const ArbitragePage: React.FC = () => {
           try {
             if (!pair || !pair.leg1 || !pair.leg2) continue;
             
-            const apiBase = process.env.REACT_APP_API_URL || 'http://localhost:7000';
+            const apiBase = process.env.REACT_APP_API_URL || 'http://localhost:7001';
             // 根據交易對類型構建正確的API URL
             const getPriceUrl = (exchange: string, symbol: string, type: string) => {
               if (exchange === 'bybit') {
@@ -1140,7 +1140,7 @@ const ArbitragePage: React.FC = () => {
                         try {
                           if (!pair || !pair.leg1 || !pair.leg2) continue;
                           
-                          const apiBase = process.env.REACT_APP_API_URL || 'http://localhost:7000';
+                          const apiBase = process.env.REACT_APP_API_URL || 'http://localhost:7001';
                           // 根據交易對類型構建正確的API URL
                           const getPriceUrl = (exchange: string, symbol: string, type: string) => {
                             if (exchange === 'bybit') {

@@ -22,7 +22,7 @@ const RECONNECT_DELAY = 1500; // 1.5秒，加快重連
  * 連接WebSocket
  */
 export function connectWebSocket(dispatch: AppDispatch) {
-  const serverUrl = process.env.REACT_APP_SERVER_URL || 'http://localhost:7000';
+  const serverUrl = process.env.REACT_APP_SERVER_URL || 'http://localhost:7001';
   
   // 創建WebSocket連接（使用原生WebSocket而不是socket.io）
   const wsUrl = serverUrl.replace('http', 'ws') + '/ws';

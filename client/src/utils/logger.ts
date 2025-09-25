@@ -26,7 +26,7 @@ class FrontendLogger {
 
   private initWebSocket() {
     try {
-      const wsUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:7000/ws';
+      const wsUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:7001/ws';
       // 靜默連線，不在控制台輸出
       this.ws = new WebSocket(wsUrl);
       

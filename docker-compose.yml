@@ -6,7 +6,7 @@ services:
     build: .
     container_name: arbitrade-backend
     ports:
-      - "7000:7000"
+      - "7001:7001"
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
@@ -21,7 +21,7 @@ services:
       - ./logs:/app/logs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:7000/health', timeout=5)"]
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:7001/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
